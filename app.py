@@ -18,6 +18,22 @@ if "download_queue" not in st.session_state:
 def show_more():
     st.session_state.limit_results += 25
 
+# --- 1. FUNZIONE CONTROLLO STATO SERVER (Heartbeat) ---
+def get_server_status(bucket):
+    """Verifica se il Bridge locale è attivo leggendo il segnale di vita."""
+    try:
+        blob = bucket.blob("metadata/heartbeat.json")
+        data = json.loads(blob.download_as_text())
+        last_seen = data.get("last_seen", 0)
+        
+        # Se l'ultimo segnale è di meno di 2 minuti fa (120 sec), è online
+        if (time.time() - last_seen) < 120:
+            return "🟢 SERVER ONLINE (PC H24)"
+        else:
+            return "🔴 SERVER OFFLINE (PC Spento)"
+    except:
+        return "⚪ STATO SCONOSCIUTO"
+
 # --- FUNZIONE DI SICUREZZA ---
 def check_password():
     """Restituisce True se l'utente ha inserito la password corretta tramite Secrets."""
@@ -39,30 +55,51 @@ def check_password():
         return False
     return True
 
-# --- DIALOG PER ANTEPRIMA ARTICOLO ---
-@st.dialog("Anteprima Articolo")
+# --- 2. DIALOG PER ANTEPRIMA (Versione Ingrandita) ---
+@st.dialog("Anteprima Tecnica Articolo", width="large")
 def preview_dialog(item, bucket):
-    st.write(f"**Codice:** {item['code']}")
+    st.write(f"🔍 **Dettaglio Codice:** {item['code']}")
+    st.write(f"**Categoria:** {item.get('category', 'N/D')}")
     
-    # Identifica se esiste un formato immagine nell'indice
     img_formats = [f for f in item.get('formats', []) if f.upper() in ['JPG', 'PNG', 'JPEG']]
     
     if img_formats:
-        # Costruzione del percorso: archive/NOME_ARTICOLO/NOME_ARTICOLO.estensione
-        estensione = img_formats[0].lower()
-        cloud_path = f"archive/{item['code']}/{item['code']}.{estensione}"
+        ext = img_formats[0].lower()
+        cloud_path = f"archive/{item['code']}/{item['code']}.{ext}"
         
         try:
             blob = bucket.blob(cloud_path)
             img_bytes = blob.download_as_bytes()
-            st.image(img_bytes, caption=f"Anteprima di {item['code']}", use_container_width=True)
+            # use_container_width=True fa sì che l'immagine riempia tutto il pop-up "large"
+            st.image(img_bytes, caption=f"Anteprima tecnica di {item['code']}", use_container_width=True)
+            st.caption(f"Percorso cloud: {cloud_path}")
         except:
-            st.error(f"Immagine non trovata nel Cloud al percorso: {cloud_path}")
+            st.error("L'immagine è registrata ma non ancora caricata nel Cloud dal Bridge locale.")
     else:
         st.warning("Nessuna anteprima disponibile per questo codice.")
+    
+    st.divider()
+    st.json({"Tag": item.get('tags', []), "Formati": item.get('formats', [])})
 
 # --- LOGICA ESECUZIONE ---
 if check_password():
+    # Inizializzazione Google Cloud dai Secrets
+    try:
+        gcp_info = json.loads(st.secrets["gcp_service_account"])
+        client = storage.Client.from_service_account_info(gcp_info)
+        bucket = client.bucket(BUCKET_NAME)
+    except Exception as e:
+        st.error(f"Errore connessione Cloud: {e}")
+        st.stop()
+
+    # 3. BARRA LATERALE - MONITORAGGIO STATO
+    status = get_server_status(bucket)
+    st.sidebar.subheader("📡 Connessione Archivio")
+    st.sidebar.markdown(f"**Stato:** {status}")
+    
+    if "OFFLINE" in status:
+        st.sidebar.error("⚠️ Il PC locale non risponde. I download e le nuove anteprime sono bloccati.")
+
     # 1. IMMAGINE DI COPERTINA
     try:
         st.image("cover.jpg", use_container_width=True)
@@ -79,28 +116,17 @@ if check_password():
         .stButton>button { background-color: #1a73e8; color: white !important; border-radius: 4px; border: none; font-weight: 500; height: 40px; }
         .stButton>button:hover { background-color: #1557b0; color: white !important; }
         label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
-        /* Stile per le righe dei risultati */
-        .result-row { padding: 10px; border-bottom: 1px solid #eee; }
         </style>
         """, unsafe_allow_html=True)
-
-    # Inizializzazione Google Cloud dai Secrets
-    try:
-        gcp_info = json.loads(st.secrets["gcp_service_account"])
-        client = storage.Client.from_service_account_info(gcp_info)
-        bucket = client.bucket(BUCKET_NAME)
-    except Exception as e:
-        st.error(f"Errore connessione Cloud: {e}")
-        st.stop()
 
     # RECUPERO CATEGORIE
     try:
         cats_json = bucket.blob("metadata/categories.json").download_as_text()
         lista_categorie = json.loads(cats_json)
     except:
-        lista_categorie = ["Definizione categorie in corso..."]
+        lista_categorie = ["Aggiornamento categorie in corso..."]
 
-    tab1, tab2 = st.tabs(["📤 CHECK-IN", "🔍 CHECK-OUT"])
+    tab1, tab2 = st.tabs(["🚀 CHECK-IN", "🔍 CHECK-OUT"])
 
     # --- TAB 1: CHECK-IN ---
     with tab1:
@@ -113,10 +139,8 @@ if check_password():
             with col2:
                 tags = st.text_input("Tag (separati da virgola)")
                 solo_trasferimento = st.checkbox("Solo Trasferimento")
-
             note = st.text_area("Note Tecniche")
             upload_files = st.file_uploader("Trascina i file", accept_multiple_files=True)
-            
             if st.form_submit_button("INVIA CODICE"):
                 if upload_files and nome_articolo:
                     with st.spinner("Sincronizzazione..."):
@@ -131,8 +155,6 @@ if check_password():
     # --- TAB 2: CHECK-OUT (CONSOLIDATA) ---
     with tab2:
         st.subheader("Ricerca e Prelievo")
-        
-        # Lettura indice dal Cloud
         try:
             idx_blob = bucket.blob("metadata/archivio_index.json").download_as_text()
             index_data = json.loads(idx_blob)["components"]
@@ -140,17 +162,14 @@ if check_password():
             st.error("Indice non disponibile.")
             index_data = []
 
-        # 1. Filtri (AND Logic)
         c1, c2 = st.columns(2)
         with c1: n1 = st.text_input("Ricerca Nome 1", key="f1").lower()
         with c2: n2 = st.text_input("Ricerca Nome 2", key="f2").lower()
-        
         t1, t2, t3 = st.columns(3)
         with t1: tag1 = t1.text_input("Tag 1", key="f3").lower()
         with t2: tag2 = t2.text_input("Tag 2", key="f4").lower()
         with t3: tag3 = t3.text_input("Tag 3", key="f5").lower()
 
-        # Filtraggio
         filtered = []
         for item in index_data:
             full_text = (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower()
@@ -159,38 +178,29 @@ if check_password():
 
         st.info(f"📍 Risultati trovati: {len(filtered)} | Elementi in coda prelievo: {len(st.session_state.download_queue)}")
 
-        # 3. Contenitore Scorrevole (Scalable)
         with st.container(height=500, border=True):
             for item in filtered[:st.session_state.limit_results]:
                 col_info, col_btn_pre, col_btn_sel = st.columns([4, 1, 1])
-                
                 with col_info:
                     st.write(f"📦 **{item['code']}**")
                     st.caption(f"{item['category']} | Tags: {', '.join(item['tags'][:3])}...")
-                
                 with col_btn_pre:
                     if st.button("👁️ Anteprima", key=f"pre_{item['code']}"):
                         preview_dialog(item, bucket)
-                
                 with col_btn_sel:
                     is_selected = item['code'] in st.session_state.download_queue
                     label = "✅ Selezionato" if is_selected else "📥 Seleziona"
                     if st.button(label, key=f"sel_{item['code']}", type="secondary" if is_selected else "primary"):
                         if is_selected:
                             st.session_state.download_queue.remove(item['code'])
-                            st.toast(f"Rimosso: {item['code']}")
                         else:
                             st.session_state.download_queue.add(item['code'])
-                            st.toast(f"Aggiunto: {item['code']}")
                         st.rerun()
 
-        # 4. Paginazione
         if len(filtered) > st.session_state.limit_results:
             st.button("Mostra altri risultati...", on_click=show_more)
 
         st.write("---")
-        
-        # 5. Bottone di Scarico
         if st.button("🚀 GENERA LINK PER DOWNLOAD (ZIP)"):
             if st.session_state.download_queue:
                 req_id = int(time.time())
@@ -202,7 +212,6 @@ if check_password():
             else:
                 st.error("Coda di prelievo vuota. Seleziona almeno un articolo.")
         
-        # Recupero Link
         if 'last_req_id' in st.session_state:
             req_id = st.session_state['last_req_id']
             res_blob = bucket.blob(f"responses/{req_id}.json")
