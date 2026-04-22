@@ -5,7 +5,6 @@ import time
 from google.cloud import storage
 
 # --- CONFIGURAZIONE CORE ---
-# Nota: su Streamlit Cloud useremo st.secrets invece del file fisico
 BUCKET_NAME = "cad-vault-marco"
 
 st.set_page_config(page_title="PORTALE CAD", layout="wide", page_icon="🏗️")
@@ -20,7 +19,6 @@ def check_password():
         st.title("🔒 Accesso Riservato")
         pwd = st.text_input("Inserisci la password dell'Archivio", type="password")
         if st.button("Accedi"):
-            # Verifica la password dai Secrets di Streamlit Cloud
             try:
                 if pwd == st.secrets["login"]["password"]:
                     st.session_state["password_correct"] = True
@@ -32,41 +30,73 @@ def check_password():
         return False
     return True
 
-# --- CSS AD ALTO CONTRASTO (Leggibilità Estrema - B&W) ---
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Arial:wght@400;700&display=swap');
-    
-    .stApp { background-color: #ffffff; color: #000000; font-family: 'Arial', sans-serif !important; }
-    h1, h2, h3, h4, label, p, .stMarkdown { color: #000000 !important; }
-    
-    .stButton>button { 
-        background-color: #000000; color: #ffffff !important; 
-        font-weight: bold; border-radius: 0px; border: 2px solid #000000;
-        width: 100%; height: 50px; transition: all 0.1s;
-    }
-    .stButton>button:hover { background-color: #333333; color: #ffffff !important; }
-
-    .stTextInput>div>div>input, .stTextArea>div>div>textarea, .stSelectbox>div>div>div { 
-        border: 2px solid #000000 !important; color: #000000 !important; 
-        border-radius: 0px !important; background-color: #ffffff !important;
-    }
-    
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { 
-        height: 50px; background-color: #eeeeee; border: 1px solid #000000; color: #000000;
-    }
-    .stTabs [aria-selected="true"] { background-color: #000000 !important; color: #ffffff !important; }
-    
-    .stWarning, .stInfo, .stSuccess { 
-        background-color: #f8f9fa !important; border: 1px solid #000000 !important; color: #000000 !important; 
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- LOGICA APPLICATIVO ---
+# --- LOGICA ESECUZIONE ---
 if check_password():
-    # Inizializzazione Google Cloud dai Secrets (Richiesto per Cloud Deployment)
+    # 1. IMMAGINE DI COPERTINA
+    try:
+        st.image("cover.jpg", use_container_width=True)
+    except:
+        st.info("Immagine di copertina non caricata.")
+
+    # 2. NUOVO CSS "CHROME STYLE"
+    st.markdown("""
+        <style>
+        /* Sfondo generale chiaro stile Chrome */
+        .stApp { background-color: #f8f9fa; }
+        
+        /* Personalizzazione TAB stile Chrome */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+            background-color: #dee2e6;
+            padding: 5px 5px 0px 5px;
+            border-radius: 5px 5px 0 0;
+        }
+        .stTabs [data-baseweb="tab"] {
+            background-color: #e9ecef;
+            border: none;
+            padding: 10px 20px;
+            color: #495057 !important;
+            font-weight: 500 !important;
+            border-radius: 5px 5px 0 0;
+            transition: all 0.2s;
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            background-color: #f8f9fa;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: #ffffff !important;
+            color: #1a73e8 !important; /* Blu Chrome */
+            border-bottom: 3px solid #1a73e8 !important;
+        }
+        
+        /* Box e Input */
+        .stTextInput>div>div>input, .stTextArea>div>div>textarea, .stSelectbox>div>div>div {
+            border: 1px solid #ced4da !important;
+            border-radius: 4px !important;
+            background-color: #ffffff !important;
+        }
+        
+        /* Pulsanti Premium */
+        .stButton>button {
+            background-color: #1a73e8;
+            color: white !important;
+            border-radius: 4px;
+            border: none;
+            font-weight: 500;
+            height: 45px;
+            width: 100%;
+        }
+        .stButton>button:hover {
+            background-color: #1557b0;
+            color: white !important;
+        }
+
+        /* Testi e Labels */
+        label, p, h1, h2, h3, h4 { color: #212529 !important; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        </style>
+        """, unsafe_allow_html=True)
+
+    # Inizializzazione Google Cloud dai Secrets
     try:
         gcp_info = json.loads(st.secrets["gcp_service_account"])
         client = storage.Client.from_service_account_info(gcp_info)
@@ -80,32 +110,30 @@ if check_password():
         cats_json = bucket.blob("metadata/categories.json").download_as_text()
         lista_categorie = json.loads(cats_json)
     except:
-        lista_categorie = ["Definizione categorie in corso..."]
+        lista_categorie = ["Aggiornamento categorie in corso..."]
 
-    tab1, tab2 = st.tabs(["🚀 CHECK-IN", "🔍 CHECK-OUT"])
+    tab1, tab2 = st.tabs(["📤 CHECK-IN", "🔍 CHECK-OUT"])
 
     # --- TAB 1: CHECK-IN ---
     with tab1:
-        st.subheader("Inserimento Nuovo Articolo")
-        st.markdown("⚠️ **ATTENZIONE**: Carica solo i file relativi a **UN SINGOLO CODICE** (es. .stp + .pdf + .dwg).")
+        st.subheader("Nuovo Articolo nell'Archivio")
+        st.info("Carica i file 3D e 2D per un singolo codice articolo.")
         
         with st.form("form_checkin", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                nome_articolo = st.text_input("NOME ARTICOLO (sarà il nome finale dei file e della cartella)")
-                categoria = st.selectbox("DESTINAZIONE (Sottocategoria)", lista_categorie)
+                nome_articolo = st.text_input("Codice Articolo", placeholder="es. PRJ-001")
+                categoria = st.selectbox("Categoria", lista_categorie)
             with col2:
-                tags = st.text_input("TAG (separati da virgola)")
-                solo_trasferimento = st.checkbox("SOLO TRASFERIMENTO (Nessuna rinomina automatica)")
+                tags = st.text_input("Tag (es. alluminio, lavorato)")
+                solo_trasferimento = st.checkbox("Solo Trasferimento (Nessuna elaborazione)")
 
-            note = st.text_area("NOTE TECNICHE")
-            upload_files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
+            note = st.text_area("Note Tecniche")
+            upload_files = st.file_uploader("Documentazione CAD", accept_multiple_files=True)
             
-            st.write("---")
-            if st.form_submit_button("INVIA ALL'AGENTE"):
+            if st.form_submit_button("INVIA CODICE"):
                 if upload_files and nome_articolo:
-                    with st.spinner("INVIO IN CORSO..."):
-                        # Creazione pacchetto metadati
+                    with st.spinner("Sincronizzazione in corso..."):
                         task_data = {
                             "nome_articolo": nome_articolo,
                             "categoria": categoria,
@@ -114,35 +142,30 @@ if check_password():
                             "solo_trasferimento": solo_trasferimento,
                             "timestamp": time.time()
                         }
-                        
-                        # 1. Upload Task JSON
                         bucket.blob(f"inbox/{nome_articolo}.json").upload_from_string(json.dumps(task_data, indent=4))
-                        
-                        # 2. Upload Files in subfolder
                         for f in upload_files:
                             bucket.blob(f"inbox/{nome_articolo}/{f.name}").upload_from_file(f)
-                            
                         st.balloons()
-                        st.success(f"✅ Articolo {nome_articolo} inviato correttamente!")
+                        st.success(f"Archiviazione per {nome_articolo} avviata con successo.")
                 else:
-                    st.error("ERRORE: Inserire Nome Articolo e almeno un file.")
+                    st.error("Inserire codice e file.")
 
     # --- TAB 2: CHECK-OUT ---
     with tab2:
-        st.subheader("Ricerca nell'Indice Centrale")
+        st.subheader("Ricerca Articoli")
         
         # Lettura archivio.json dal Cloud
         try:
             idx_blob = bucket.blob("metadata/archivio_index.json").download_as_text()
             index_data = json.loads(idx_blob)["components"]
         except:
-            st.error("Indice non disponibile. Avvia il Bridge sul PC H24.")
+            st.error("Indice Centrale non disponibile via Cloud.")
             index_data = []
 
-        # GRIGLIA DI RICERCA (Logica AND)
+        # GRIGLIA DI RICERCA
         c1, c2 = st.columns(2)
-        with c1: n1 = st.text_input("Parola Nome 1").lower()
-        with c2: n2 = st.text_input("Parola Nome 2").lower()
+        with c1: n1 = st.text_input("Parola 1").lower()
+        with c2: n2 = st.text_input("Parola 2").lower()
         
         t1, t2, t3 = st.columns(3)
         with t1: tag1 = st.text_input("Tag 1").lower()
@@ -157,13 +180,15 @@ if check_password():
                 if (n1 in code and n2 in code) and (tag1 in tags_list and tag2 in tags_list and tag3 in tags_list):
                     results.append(item)
 
-            st.markdown(f"### Risultati trovati: **{len(results)}**")
+            st.write(f"**Risultati filtrati ({len(results)}):**")
             
+            # IL CONTENITORE SCORREVOLE (UX Scalabile per Chrome Style)
             selected_codes = []
-            for res in results:
-                if st.checkbox(f"📦 {res['code']} | {res['category']}", key=f"out_{res['code']}"):
-                    selected_codes.append(res['code'])
-
+            with st.container(height=450):
+                for res in results:
+                    if st.checkbox(f"📦 {res['code']} | {res['category']}", key=f"out_{res['code']}"):
+                        selected_codes.append(res['code'])
+            
             st.write("---")
             if st.button("PREPARA LINK DI DOWNLOAD"):
                 if selected_codes:
@@ -171,20 +196,16 @@ if check_password():
                     req = {"items": selected_codes, "request_id": req_id, "timestamp": time.time()}
                     bucket.blob(f"requests/req_{req_id}.json").upload_from_string(json.dumps(req, indent=4))
                     st.session_state['last_req_id'] = req_id
-                    st.success(f"⌛ Richiesta **req_{req_id}** inviata. Il Bridge sta zippando i file.")
+                    st.success(f"Richiesta prelievo {req_id} inviata.")
                 else:
-                    st.error("Selezionare almeno un elemento!")
+                    st.error("Selezionare almeno un articolo.")
             
-            # --- LOGICA DI RECUPERO LINK ---
             if 'last_req_id' in st.session_state:
                 req_id = st.session_state['last_req_id']
                 res_blob = bucket.blob(f"responses/{req_id}.json")
                 if res_blob.exists():
                     res_data = json.loads(res_blob.download_as_text())
-                    st.markdown("---")
-                    st.markdown(f"### ✅ IL TUO DOWNLOAD È PRONTO!")
-                    st.link_button("CLICCA QUI PER SCARICARE LO ZIP", res_data['url'])
+                    st.link_button("🚀 SCARICA ZIP PRONTO", res_data['url'])
                 else:
-                    st.write("Stato: In elaborazione... clicca 'Aggiorna' tra poco.")
-                    if st.button("AGGIORNA STATO DOWNLOAD"):
+                    if st.button("🔄 AGGIORNA STATO"):
                         st.rerun()
