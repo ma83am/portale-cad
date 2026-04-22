@@ -70,8 +70,14 @@ def preview_dialog(item, bucket):
         try:
             blob = bucket.blob(cloud_path)
             img_bytes = blob.download_as_bytes()
-            # use_container_width=True fa sì che l'immagine riempia tutto il pop-up "large"
-            st.image(img_bytes, caption=f"Anteprima di {item['code']}", output_format="JPEG", width=None)
+            
+            # Mostriamo l'immagine. Se è più larga del pop-up si adatta, 
+            # se è più piccola resta della sua dimensione reale (niente pixel evidenti)
+            st.image(img_bytes) 
+            
+            # Aggiungiamo un link per scaricare l'immagine localmente
+            st.download_button("💾 Scarica questa immagine", img_bytes, file_name=f"{item['code']}.jpg")
+            
             st.caption(f"Percorso cloud: {cloud_path}")
         except:
             st.error("L'immagine è registrata ma non ancora caricata nel Cloud dal Bridge locale.")
