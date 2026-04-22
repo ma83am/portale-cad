@@ -71,7 +71,7 @@ def preview_dialog(item, bucket):
             blob = bucket.blob(cloud_path)
             img_bytes = blob.download_as_bytes()
             # use_container_width=True fa sì che l'immagine riempia tutto il pop-up "large"
-            st.image(img_bytes, caption=f"Anteprima tecnica di {item['code']}", use_container_width=True)
+            st.image(img_bytes, caption=f"Anteprima di {item['code']}", output_format="JPEG", width=None)
             st.caption(f"Percorso cloud: {cloud_path}")
         except:
             st.error("L'immagine è registrata ma non ancora caricata nel Cloud dal Bridge locale.")
