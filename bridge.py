@@ -155,6 +155,11 @@ if __name__ == "__main__":
             process_cloud_inbox(bucket)
             handle_checkout(bucket)
             cleanup_previews(bucket, 5)
+            
+            # Invia il segnale di vita (Heartbeat) per il monitoraggio remoto
+            heartbeat_data = {"last_seen": time.time(), "status": "online"}
+            bucket.blob("metadata/heartbeat.json").upload_from_string(json.dumps(heartbeat_data))
+            print("💓 Heartbeat inviato.")
         except Exception as e:
             print(f"❌ Errore nel ciclo di lavoro: {e}")
         
