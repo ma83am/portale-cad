@@ -14,6 +14,8 @@ if "limit_results" not in st.session_state:
     st.session_state.limit_results = 25
 if "download_queue" not in st.session_state:
     st.session_state.download_queue = set()
+if "f1_query" not in st.session_state:
+    st.session_state.f1_query = ""
 
 def show_more():
     st.session_state.limit_results += 25
@@ -26,13 +28,25 @@ def get_server_status(bucket):
         data = json.loads(blob.download_as_text())
         last_seen = data.get("last_seen", 0)
         
-        # Se l'ultimo segnale è di meno di 2 minuti fa (120 sec), è online
         if (time.time() - last_seen) < 120:
             return "🟢 SERVER ONLINE (PC H24)"
         else:
             return "🔴 SERVER OFFLINE (PC Spento)"
     except:
         return "⚪ STATO SCONOSCIUTO"
+
+# --- 2. FUNZIONE PERSISTENZA SIDEBAR (Sync & History) ---
+def get_sync_data(bucket):
+    """Recupera la coda di sincronizzazione e lo storico dei componenti dal Cloud."""
+    try:
+        q_blob = bucket.blob("metadata/sync_queue.json")
+        h_blob = bucket.blob("metadata/history.json")
+        
+        queue = json.loads(q_blob.download_as_text()) if q_blob.exists() else {}
+        history = json.loads(h_blob.download_as_text()) if h_blob.exists() else []
+        return queue, history
+    except:
+        return {}, []
 
 # --- FUNZIONE DI SICUREZZA ---
 def check_password():
@@ -55,35 +69,31 @@ def check_password():
         return False
     return True
 
-# --- 2. DIALOG PER ANTEPRIMA (Versione Ingrandita) ---
+# --- 3. DIALOG PER ANTEPRIMA (Versione Ingrandita) ---
 @st.dialog("Anteprima Tecnica Articolo", width="large")
 def preview_dialog(item, bucket):
     st.write(f"🔍 **Dettaglio Codice:** {item['code']}")
-    st.write(f"**Categoria:** {item.get('category', 'N/D')}")
-    
     img_formats = [f for f in item.get('formats', []) if f.upper() in ['JPG', 'PNG', 'JPEG']]
     
     if img_formats:
         ext = img_formats[0].lower()
         cloud_path = f"archive/{item['code']}/{item['code']}.{ext}"
-        
         try:
             blob = bucket.blob(cloud_path)
             img_bytes = blob.download_as_bytes()
-            
-            # Mostriamo l'immagine. Se è più larga del pop-up si adatta, 
-            # se è più piccola resta della sua dimensione reale (niente pixel evidenti)
-            st.image(img_bytes) 
-            
-            # Aggiungiamo un link per scaricare l'immagine localmente
+            st.image(img_bytes, caption=f"Anteprima di {item['code']}")
             st.download_button("💾 Scarica questa immagine", img_bytes, file_name=f"{item['code']}.jpg")
-            
-            st.caption(f"Percorso cloud: {cloud_path}")
         except:
             st.error("L'immagine è registrata ma non ancora caricata nel Cloud dal Bridge locale.")
+            # Se l'utente clicca qui, aggiungiamo alla coda urgente
+            if st.button("🚀 Richiedi Sincronizzazione Urgente"):
+                q, h = get_sync_data(bucket)
+                q[item['code']] = {"synced": False, "formats": img_formats, "timestamp": time.time()}
+                bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(q))
+                st.success("Richiesta inviata al Bridge locale!")
+                st.rerun()
     else:
-        st.warning("Nessuna anteprima disponibile per questo codice.")
-    
+        st.warning("Nessuna anteprima disponibile.")
     st.divider()
     st.json({"Tag": item.get('tags', []), "Formati": item.get('formats', [])})
 
@@ -98,21 +108,52 @@ if check_password():
         st.error(f"Errore connessione Cloud: {e}")
         st.stop()
 
-    # 3. BARRA LATERALE - MONITORAGGIO STATO
-    status = get_server_status(bucket)
-    st.sidebar.subheader("📡 Connessione Archivio")
-    st.sidebar.markdown(f"**Stato:** {status}")
+    # --- SIDEBAR DASHBOARD ---
+    queue, history = get_sync_data(bucket)
     
-    if "OFFLINE" in status:
-        st.sidebar.error("⚠️ Il PC locale non risponde. I download e le nuove anteprime sono bloccati.")
+    with st.sidebar:
+        # Immagine copertina ridotta in sidebar o logo (opzionale)
+        st.header("🏗️ PORTALE CAD")
+        
+        # STATUS SERVER
+        status = get_server_status(bucket)
+        st.markdown(f"**Stato:** {status}")
+        if "OFFLINE" in status:
+            st.error("⚠️ Server locale non risponde.")
+        
+        st.divider()
+        
+        # SEZIONE 1: RICHIESTE IN CORSO
+        st.subheader("⏳ In Sincronizzazione")
+        pending = {k: v for k, v in queue.items() if not v.get('synced', False)}
+        if not pending:
+            st.caption("Nessuna richiesta pendente.")
+        else:
+            for code, data in pending.items():
+                st.info(f"**{code}**\nAttendere Bridge...")
 
-    # 1. IMMAGINE DI COPERTINA
-    try:
-        st.image("cover.jpg", use_container_width=True)
-    except:
-        pass
+        # NOTIFICA FILE PRONTI
+        ready = {k: v for k, v in queue.items() if v.get('synced', False)}
+        for code in list(ready.keys()):
+            if st.button(f"✅ {code} PRONTO", key=f"ready_{code}"):
+                if code not in history:
+                    history.insert(0, code)
+                    bucket.blob("metadata/history.json").upload_from_string(json.dumps(history[:20]))
+                del queue[code]
+                bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(queue))
+                st.rerun()
 
-    # 2. CSS "CHROME STYLE"
+        st.divider()
+
+        # SEZIONE 2: STORICO RECENTI
+        st.subheader("🕒 Recenti")
+        for old_code in history:
+            if st.button(f"📄 {old_code}", key=f"hist_{old_code}", use_container_width=True):
+                st.session_state.f1_query = old_code # Forza la ricerca
+                st.rerun()
+
+    # --- CONTENT AREA ---
+    # CSS "CHROME STYLE"
     st.markdown("""
         <style>
         .stApp { background-color: #f8f9fa; }
@@ -158,7 +199,7 @@ if check_password():
                 else:
                     st.error("Dati incompleti.")
 
-    # --- TAB 2: CHECK-OUT (CONSOLIDATA) ---
+    # --- TAB 2: CHECK-OUT ---
     with tab2:
         st.subheader("Ricerca e Prelievo")
         try:
@@ -169,7 +210,12 @@ if check_password():
             index_data = []
 
         c1, c2 = st.columns(2)
-        with c1: n1 = st.text_input("Ricerca Nome 1", key="f1").lower()
+        with c1: 
+            # Utilizza il valore dalla session_state se presente (per la cronologia)
+            n1 = st.text_input("Ricerca Nome 1", value=st.session_state.f1_query, key="f1").lower()
+            # Reset della query dopo l'uso per permettere nuove ricerche
+            st.session_state.f1_query = ""
+            
         with c2: n2 = st.text_input("Ricerca Nome 2", key="f2").lower()
         t1, t2, t3 = st.columns(3)
         with t1: tag1 = t1.text_input("Tag 1", key="f3").lower()
