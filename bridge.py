@@ -132,6 +132,41 @@ def cleanup_previews(bucket, limit_gb=5):
             current_size -= sz
             print(f"🗑️ Rimossa anteprima obsoleta: {b.name}")
 
+def handle_urgent_requests(bucket):
+    """Controlla se il web ha richiesto file non ancora presenti (Sync Queue)."""
+    index_path = os.path.join(BASE_PATH, "archivio.json")
+    queue_blob = bucket.blob("metadata/sync_queue.json")
+    
+    if not queue_blob.exists() or not os.path.exists(index_path): return
+
+    try:
+        queue = json.loads(queue_blob.download_as_text())
+        with open(index_path, 'r') as f:
+            db_locale = json.load(f).get('components', [])
+        
+        updated = False
+        for item_code, details in list(queue.items()):
+            # Se non è ancora sincronizzato
+            if not details.get('synced', False):
+                # Cerchiamo l'articolo nel database locale
+                match = next((i for i in db_locale if i['code'] == item_code), None)
+                if match:
+                    folder = os.path.dirname(match['path'])
+                    for fmt in details.get('formats', []):
+                        local_f = os.path.join(folder, f"{item_code}.{fmt.lower()}")
+                        if os.path.exists(local_f):
+                            cloud_p = f"archive/{item_code}/{item_code}.{fmt.lower()}"
+                            bucket.blob(cloud_p).upload_from_filename(local_f)
+                    
+                    queue[item_code]['synced'] = True
+                    updated = True
+                    print(f"⚡ Sincronizzazione URGENTE completata: {item_code}")
+
+        if updated:
+            queue_blob.upload_from_string(json.dumps(queue))
+    except Exception as e:
+        print(f"⚠️ Errore handle_urgent_requests: {e}")
+
 if __name__ == "__main__":
     # Garantisco compatibilità UTF8 per le emoji nei log Windows
     import sys
@@ -154,6 +189,7 @@ if __name__ == "__main__":
             sync_previews(bucket) # Analisi e upload automatico anteprime
             process_cloud_inbox(bucket)
             handle_checkout(bucket)
+            handle_urgent_requests(bucket) # Smistamento richieste prioritarie dal web
             cleanup_previews(bucket, 5)
             
             # Invia il segnale di vita (Heartbeat) per il monitoraggio remoto
