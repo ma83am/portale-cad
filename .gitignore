@@ -1,0 +1,12 @@
+# Segreti e Chiavi
+secrets/
+.streamlit/
+key.json
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# Dati Locali
+*.json
