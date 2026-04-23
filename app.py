@@ -5,7 +5,6 @@ import time
 from google.cloud import storage
 
 # --- 1. DEFINIZIONE RIGIDA CATEGORIE ---
-# Mappiamo il nome visualizzato al percorso reale sul disco D:
 CATEGORIE_FISSE = {
     "1_ASSIEMI": "1_ASSIEMI",
     "2_GRUPPI": "2_GRUPPI",
@@ -123,7 +122,7 @@ if check_password():
     st.image("cover.jpg", use_container_width=True)
     st.title("🏗️ Portale CAD Centrale")
 
-    # CSS "CHROME STYLE" REFINEMENT
+    # CSS "CLEAN STYLE"
     st.markdown("""
         <style>
         .stApp { background-color: #f8f9fa; }
@@ -131,9 +130,6 @@ if check_password():
         .stTabs [data-baseweb="tab"] { background-color: #e9ecef; border: none; padding: 10px 20px; color: #495057 !important; font-weight: 500 !important; border-radius: 5px 5px 0 0; }
         .stTabs [aria-selected="true"] { background-color: #ffffff !important; color: #1a73e8 !important; border-bottom: 3px solid #1a73e8 !important; }
         .stButton>button { border-radius: 4px; font-weight: 500; height: 40px; }
-        /* Pulsante primario (Esegui/Selezione) */
-        .stButton>button[kind="primary"] { background-color: #e3f2fd; color: #1a73e8 !important; border: 1px solid #1a73e8; }
-        .stButton>button[kind="primary"]:hover { background-color: #1a73e8; color: white !important; }
         label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
         </style>
         """, unsafe_allow_html=True)
@@ -143,37 +139,36 @@ if check_password():
     # --- TAB 1: CHECK-IN ---
     with tab1:
         st.subheader("Archiviazione Nuovo Articolo")
-        with st.form("form_checkin", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1: 
-                nome_articolo = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
-            with col2: 
-                tag_input = st.text_input("Tag", placeholder="separati da virgola")
+        
+        col_a, col_b = st.columns(2)
+        with col_a: nome_art = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
+        with col_b: tag_art = st.text_input("Tag", placeholder="separati da virgola")
 
-            # Box unico con struttura rigida
-            selezione = st.selectbox("Seleziona Categoria", list(CATEGORIE_FISSE.keys()))
-            percorso_relativo = CATEGORIE_FISSE[selezione]
-            
-            if nome_articolo:
-                destinazione_finale = f"D:/ARCHIVIO CAD/{percorso_relativo}/{nome_articolo}/"
+        # Selezione Categoria (fuori da ogni form per aggiornamento live)
+        sel_cat = st.selectbox("Seleziona Categoria", list(CATEGORIE_FISSE.keys()))
+        
+        # Calcolo immediato del percorso
+        path_relativo = CATEGORIE_FISSE[sel_cat]
+        codice_mostrato = nome_art if nome_art else "[INSERIRE CODICE]"
+        dest_f = f"D:/ARCHIVIO CAD/{path_relativo}/{codice_mostrato}/"
+        
+        # Box Destinazione (Ora si aggiorna al millisecondo)
+        st.info(f"📍 **Destinazione:** {dest_f}")
+
+        solo_inbox = st.checkbox("Solo trasferimento (inbox)")
+        caricamento = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
+        
+        if st.button("🚀 ESEGUI CHECK-IN", use_container_width=True, type="primary"):
+            if nome_art and caricamento:
+                with st.spinner("Invio..."):
+                    task_data = {"nome_articolo": nome_art, "categoria": path_relativo, "tags": tag_art, "solo_trasferimento": solo_inbox, "timestamp": time.time()}
+                    bucket.blob(f"inbox/{nome_art}.json").upload_from_string(json.dumps(task_data, indent=4))
+                    for f in caricamento:
+                        bucket.blob(f"inbox/{nome_art}/{f.name}").upload_from_file(f)
+                    st.success(f"Caricamento avviato per {nome_art}!")
+                    st.toast(f"Archiviazione {nome_art} in corso...")
             else:
-                destinazione_finale = f"D:/ARCHIVIO CAD/{percorso_relativo}/[INSERIRE CODICE]/"
-                
-            st.info(f"📍 **Destinazione:** {destinazione_finale}")
-
-            solo_tra = st.checkbox("Solo trasferimento (inbox)", value=False)
-            up_files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
-            
-            if st.form_submit_button("🚀 ESEGUI CHECK-IN", type="primary", use_container_width=True):
-                if nome_articolo and up_files:
-                    with st.spinner("Invio..."):
-                        task_data = {"nome_articolo": nome_articolo, "categoria": percorso_relativo, "tags": tag_input, "solo_trasferimento": solo_tra, "timestamp": time.time()}
-                        bucket.blob(f"inbox/{nome_articolo}.json").upload_from_string(json.dumps(task_data, indent=4))
-                        for f in up_files:
-                            bucket.blob(f"inbox/{nome_articolo}/{f.name}").upload_from_file(f)
-                        st.success(f"Richiesta inviata. Il Bridge sta lavorando su {nome_articolo}...")
-                else:
-                    st.error("Inserisci il codice articolo e almeno un file!")
+                st.error("Manca il codice articolo o almeno un file!")
 
     # --- TAB 2: CHECK-OUT ---
     with tab2:
@@ -199,20 +194,30 @@ if check_password():
         with st.container(height=550, border=False):
             for item in filtered[:st.session_state.limit_results]:
                 with st.container(border=True):
-                    c_info, c_btn1, c_btn2 = st.columns([5, 1, 1])
+                    # Layout a 3 colonne: Testo largo, Icona piccola, Checkbox piccola
+                    c_info, c_icon, c_check = st.columns([0.8, 0.1, 0.1])
+                    
                     with c_info:
                         st.markdown(f"📦 **{item['code']}**")
-                        st.caption(f"{item['category']} | {', '.join(item['tags'][:5])}...")
-                    with c_btn1:
-                        if st.button("👁️ Info", key=f"pre_{item['code']}", use_container_width=True, type="secondary"):
+                        st.caption(f"{item['category']} | {', '.join(item['tags'][:2])}...")
+                    
+                    with c_icon:
+                        # Solo un'icona per l'anteprima
+                        if st.button("👁️", key=f"p_{item['code']}", help="Vedi Anteprima", use_container_width=True):
                             preview_dialog(item, bucket)
-                    with c_btn2:
+                    
+                    with c_check:
+                        # Quadrato di selezione (Checkbox)
                         is_selected = item['code'] in st.session_state.download_queue
-                        if st.button("✅" if is_selected else "📥 Sel.", key=f"sel_{item['code']}", use_container_width=True, type="primary"):
-                            if is_selected: st.session_state.download_queue.remove(item['code'])
-                            else: 
+                        # Nota: st.checkbox ritorna il valore corrente, ma per aggiornare la coda istantaneamente
+                        # usiamo il valore e un ricaricamento se cambia.
+                        sel = st.checkbox("", value=is_selected, key=f"check_{item['code']}", help="Seleziona per Download")
+                        if sel != is_selected:
+                            if sel: 
                                 st.session_state.download_queue.add(item['code'])
                                 st.toast(f"Aggiunto: {item['code']}")
+                            else: 
+                                st.session_state.download_queue.remove(item['code'])
                             st.rerun()
 
         if len(filtered) > st.session_state.limit_results:
