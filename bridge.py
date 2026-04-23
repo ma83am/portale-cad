@@ -3,6 +3,7 @@ import time
 import json
 import shutil
 import zipfile
+from datetime import datetime, timedelta
 from google.cloud import storage
 
 # --- CONFIGURAZIONE ---
@@ -15,9 +16,9 @@ client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
 
 def create_zip(items_list, zip_name, db_components):
-    """Crea uno zip temporaneo con tutti i formati degli articoli scelti."""
-    temp_zip_path = os.path.join(INBOX_ROOT, f"{zip_name}.zip")
+    """Crea uno zip temporaneo con tutti i file degli articoli scelti in sottocartelle."""
     os.makedirs(INBOX_ROOT, exist_ok=True)
+    temp_zip_path = os.path.join(INBOX_ROOT, f"{zip_name}.zip")
     
     with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
         for code in items_list:
@@ -30,7 +31,7 @@ def create_zip(items_list, zip_name, db_components):
                         file_name = f"{code}.{fmt.lower()}"
                         full_p = os.path.join(folder, file_name)
                         if os.path.exists(full_p):
-                            # Mette i file in una cartella col nome del codice dentro lo ZIP
+                            # Inserisce i file in sottocartelle con il nome del codice articolo
                             z.write(full_p, arcname=os.path.join(code, file_name))
     return temp_zip_path
 
@@ -60,7 +61,6 @@ def process_sync_queue():
 
         updated = False
         for task_id, data in list(queue.items()):
-            # La coda può contenere vecchie entry (code: {synced...}) o nuove (task_id: {type...})
             task_type = data.get('type', 'item_zip')
             code = data.get('code')
             items = data.get('items', [code] if code else [])
@@ -68,20 +68,23 @@ def process_sync_queue():
             print(f"🛠️ Elaborazione Task {task_id}: {task_type} per {code if code else items}")
 
             if task_type in ['item_zip', 'bulk_zip', 'link']:
-                # Creazione ZIP
+                # 1. Creazione ZIP
                 zip_name = code if code else f"BULK_{int(time.time())}"
                 zip_p = create_zip(items, zip_name, db)
                 
+                # 2. Upload al Cloud
                 cloud_path = f"archive/{zip_name}/{zip_name}.zip"
                 blob = bucket.blob(cloud_path)
                 blob.upload_from_filename(zip_p)
-                os.remove(zip_p)
+                os.remove(zip_p) # Pulizia locale
                 
+                # 3. Generazione Link o Registrazione ZIP
                 if task_type == 'link':
-                    # Genera Signed URL valido 24h
-                    url = blob.generate_signed_url(expiration=86400)
+                    # FIX: Scadenza 24 ore da ADESSO tramite datetime
+                    expiration_time = datetime.utcnow() + timedelta(hours=24)
+                    link_url = blob.generate_signed_url(expiration=expiration_time)
                     history.insert(0, {
-                        "code": zip_name, "type": "link", "url": url, 
+                        "code": zip_name, "type": "link", "url": link_url, 
                         "timestamp_sync": time.time(), "items": items
                     })
                 else:
@@ -94,8 +97,7 @@ def process_sync_queue():
                 updated = True
                 print(f"✅ Task completato: {zip_name}.zip")
             
-            elif not data.get('synced'): # Vecchia logica compatibilità
-                # ... (Logica caricamento formati singoli v4.2) ...
+            elif not data.get('synced'): # Logica v4.2 compatibilità
                 item = next((i for i in db if i['code'] == code), None)
                 if item:
                     folder = os.path.dirname(item['path'])
@@ -111,19 +113,20 @@ def process_sync_queue():
 
         if updated:
             q_blob.upload_from_string(json.dumps(queue))
-            h_blob.upload_from_string(json.dumps(history[:25]))
+            h_blob.upload_from_string(json.dumps(history[:20])) # Tieni ultimi 20
     except Exception as e:
         print(f"❌ Errore Sync Queue: {e}")
 
 def process_checkin():
-    """Scarica i file dal Cloud e li archivia."""
+    """Scarica i file dal Cloud e li archivia nelle cartelle fisiche."""
     blobs = list(bucket.list_blobs(prefix="inbox/"))
     tasks = [b for b in blobs if b.name.endswith('_task.json')]
     for t_blob in tasks:
         try:
             data = json.loads(t_blob.download_as_text())
             nome = data['nome_articolo']
-            dest_dir = os.path.join(BASE_PATH, data['percorso_relativo'].replace("/", "\\"), nome)
+            rel_path = data['percorso_relativo'].replace("/", "\\")
+            dest_dir = os.path.join(BASE_PATH, rel_path, nome)
             os.makedirs(dest_dir, exist_ok=True)
             prefix = t_blob.name.replace('_task.json', '')
             formats = []
@@ -131,10 +134,10 @@ def process_checkin():
             for b in blobs:
                 if b.name.startswith(prefix) and not b.name.endswith('_task.json'):
                     ext = b.name.split('.')[-1].lower()
-                    local_f = os.path.join(dest_dir, f"{nome}.{ext}")
-                    b.download_to_filename(local_f)
+                    local_f_path = os.path.join(dest_dir, f"{nome}.{ext}")
+                    b.download_to_filename(local_f_path)
                     formats.append(ext.upper())
-                    if ext.upper() in ['STP', 'STEP', 'IAM', 'ASM', 'DWG', 'SLDPRT']: main_path = local_f
+                    if ext.upper() in ['STP', 'STEP', 'IAM', 'ASM', 'DWG', 'SLDPRT']: main_path = local_f_path
                     b.delete()
             if not data.get('solo_trasferimento'):
                 idx_path = os.path.join(BASE_PATH, "archivio.json")
@@ -152,7 +155,7 @@ def process_checkin():
         except Exception as e: print(f"❌ Errore Check-in: {e}")
 
 def cleanup_24h():
-    """Pulizia file scaduti."""
+    """Rimuove file dal cloud e dalla history dopo 24 ore."""
     h_blob = bucket.blob("metadata/history.json")
     if not h_blob.exists(): return
     try:
@@ -173,7 +176,7 @@ def cleanup_24h():
 if __name__ == "__main__":
     import sys, io
     if sys.platform == "win32": sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    print("🚀 Bridge 4.3 ONLINE (Bulk & Share Link Ready)")
+    print("🚀 Bridge 4.4 ONLINE (Link Expiry FIX & ZIP Subfolders Ready)")
     while True:
         try:
             update_heartbeat()
