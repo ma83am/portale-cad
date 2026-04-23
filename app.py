@@ -1,10 +1,12 @@
 import streamlit as st
-import os
 import json
 import time
+import os
 from google.cloud import storage
 
-# --- 1. DEFINIZIONE RIGIDA CATEGORIE ---
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="Vault CAD Marco", layout="wide", page_icon="🏗️")
+
 CATEGORIE_FISSE = {
     "1_ASSIEMI": "1_ASSIEMI",
     "2_GRUPPI": "2_GRUPPI",
@@ -17,11 +19,7 @@ CATEGORIE_FISSE = {
     "9_NON CLASSIFICATI": "9_NON CLASSIFICATI"
 }
 
-# --- CONFIGURAZIONE CORE ---
-BUCKET_NAME = "cad-vault-marco"
-st.set_page_config(page_title="PORTALE CAD", layout="wide", page_icon="🏗️")
-
-# --- STYLE CUSTOM (ICONE E TRANSIZIONI) ---
+# --- CSS MINIMALISTA (Premium UI) ---
 st.markdown("""
     <style>
     /* Rimuove i bordi e lo sfondo dai bottoni delle icone in colonna */
@@ -44,22 +42,19 @@ st.markdown("""
         color: #28a745 !important;
         transform: scale(0.95);
     }
-    /* Fix per evitare bordi streamlit standard */
-    .stButton>button:focus {
-        box-shadow: none !important;
-        background-color: transparent !important;
-        color: inherit;
-    }
+    .stCheckbox { margin-top: 10px; }
+    .stAlert { border-radius: 10px; }
+    label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- LOGICA DI STATO ---
-if "limit_results" not in st.session_state:
-    st.session_state.limit_results = 25
-if "download_queue" not in st.session_state:
+# Inizializzazione Sessione
+if "download_queue" not in st.session_state: 
     st.session_state.download_queue = set()
 if "f1_query" not in st.session_state:
     st.session_state.f1_query = ""
+if "limit_results" not in st.session_state:
+    st.session_state.limit_results = 25
 if "password_correct" not in st.session_state:
     st.session_state["password_correct"] = False
 
@@ -78,212 +73,167 @@ def check_password():
         return False
     return True
 
-def get_sync_data(bucket):
-    try:
-        q_blob = bucket.blob("metadata/sync_queue.json")
-        h_blob = bucket.blob("metadata/history.json")
-        queue = json.loads(q_blob.download_as_text()) if q_blob.exists() else {}
-        history = json.loads(h_blob.download_as_text()) if h_blob.exists() else []
-        return queue, history
-    except: return {}, []
-
-# --- DIALOG ANTEPRIMA (AVANZATO) ---
-@st.dialog("Dettaglio Tecnico", width="large")
-def preview_dialog(item, bucket):
-    st.subheader(f"📦 {item['code']}")
-    
-    # 1. VISUALIZZAZIONE IMMAGINE (PNG/JPG)
-    img_formats = [f for f in item.get('formats', []) if f.upper() in ['PNG', 'JPG', 'JPEG']]
-    if img_formats:
-        ext = img_formats[0].lower()
-        cloud_img = f"archive/{item['code']}/{item['code']}.{ext}"
-        try:
-            blob = bucket.blob(cloud_img)
-            st.image(blob.download_as_bytes(), caption=f"Anteprima di {item['code']}")
-        except:
-            st.warning("Immagine non trovata sul Cloud. Il Bridge potrebbe essere in ritardo.")
-            if st.button("🚀 Richiedi Sincronizzazione Urgente"):
-                q, h = get_sync_data(bucket)
-                q[item['code']] = {"synced": False, "formats": img_formats, "timestamp": time.time()}
-                bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(q))
-                st.success("Richiesta inviata!")
-    else:
-        st.warning("Nessuna anteprima immagine disponibile.")
-    
-    st.divider()
-
-    # 2. DOWNLOAD SINGOLI FORMATI
-    st.write("**Scarica singoli file sul dispositivo:**")
-    fmts = item.get('formats', [])
-    if fmts:
-        cols = st.columns(len(fmts))
-        for i, fmt in enumerate(fmts):
-            ext = fmt.lower()
-            cloud_file = f"archive/{item['code']}/{item['code']}.{ext}"
-            with cols[i]:
-                try:
-                    file_blob = bucket.blob(cloud_file)
-                    st.download_button(
-                        label=f"⬇️ {fmt.upper()}",
-                        data=file_blob.download_as_bytes(),
-                        file_name=f"{item['code']}.{ext}",
-                        key=f"dl_single_{item['code']}_{fmt}",
-                        use_container_width=True,
-                        help=f"Scarica il file .{ext}"
-                    )
-                except:
-                    st.button(f"🚫 {fmt}", disabled=True, help="File non disponibile per il download diretto")
-    else:
-        st.caption("Nessun file disponibile per il download diretto.")
-
-    st.divider()
-    st.write(f"**Tag associati:** {', '.join(item.get('tags', []))}")
-    st.caption(f"Percorso Archivio: {item.get('category', 'N/D')}")
-
-# --- LOGICA PRINCIPALE ---
+# --- CONNESSIONE CLOUD ---
 if check_password():
-    gcp_info = json.loads(st.secrets["gcp_service_account"])
-    client = storage.Client.from_service_account_info(gcp_info)
-    bucket = client.bucket(BUCKET_NAME)
+    try:
+        gcp_info = json.loads(st.secrets["gcp_service_account"])
+        client = storage.Client.from_service_account_info(gcp_info)
+        bucket = client.bucket("cad-vault-marco")
+    except Exception as e:
+        st.error(f"Errore connessione Cloud: {e}")
+        st.stop()
 
-    # --- SIDEBAR: DASHBOARD ---
-    queue, history = get_sync_data(bucket)
+    # --- FUNZIONI DIALOG ---
+    @st.dialog("Dettaglio Tecnico", width="large")
+    def preview_dialog(item):
+        st.subheader(f"📦 {item['code']}")
+        # Anteprima Immagine
+        img_f = [f for f in item['formats'] if f.upper() in ['PNG', 'JPG', 'JPEG']]
+        if img_f:
+            cloud_p = f"archive/{item['code']}/{item['code']}.{img_f[0].lower()}"
+            blob = bucket.blob(cloud_p)
+            if blob.exists(): 
+                st.image(blob.download_as_bytes())
+            else: 
+                st.info("📸 Anteprima in fase di sincronizzazione dal PC...")
+                if st.button("🚀 Richiedi Sincronizzazione Ora"):
+                    try:
+                        q_blob = bucket.blob("metadata/sync_queue.json")
+                        queue = json.loads(q_blob.download_as_text()) if q_blob.exists() else {}
+                        queue[item['code']] = {"synced": False, "formats": item['formats'], "timestamp": time.time()}
+                        q_blob.upload_from_string(json.dumps(queue))
+                        st.success("Richiesta inviata!")
+                    except: st.error("Errore invio richiesta.")
+        
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1: 
+            st.write("**Tag:**")
+            st.write(", ".join(item['tags']) if item['tags'] else "Nessuno")
+        with c2: 
+            st.write("**Formati (Download Singoli):**")
+            for f in item['formats']:
+                blob = bucket.blob(f"archive/{item['code']}/{item['code']}.{f.lower()}")
+                if blob.exists():
+                    st.download_button(f"⬇️ {f}", blob.download_as_bytes(), f"{item['code']}.{f.lower()}", key=f"dl_{f}")
+                else: 
+                    st.caption(f"⏳ {f} (Non sincronizzato)")
+
+    # --- SIDEBAR ---
     with st.sidebar:
-        st.subheader("📡 Stato Sistema")
+        st.title("⚙️ Sistema Vault")
+        # Heartbeat
         try:
-            hb = json.loads(bucket.blob("metadata/heartbeat.json").download_as_text())
-            if (time.time() - hb['last_seen']) < 120:
-                st.success("● PC ARCHIVIO ONLINE")
-            else: st.error("● PC ARCHIVIO OFFLINE")
-        except: st.warning("● STATO NON DISPONIBILE")
+            hb_blob = bucket.blob("metadata/heartbeat.json")
+            if hb_blob.exists():
+                hb = json.loads(hb_blob.download_as_text())
+                if (time.time() - hb['last_seen']) < 120: 
+                    st.success("● ARCHIVIO ONLINE")
+                else: st.error("● ARCHIVIO OFFLINE")
+            else: st.warning("● STATO IGNOTO")
+        except: st.warning("● ERRORE STATO")
         
         st.divider()
-        st.subheader("⏳ Coda Sync / 🕒 Recenti")
-        pending = {k: v for k, v in queue.items() if not v.get('synced', False)}
-        if pending:
-            for code in pending: st.info(f"**{code}**\nSincronizzazione...")
-        
-        ready = {k: v for k, v in queue.items() if v.get('synced', False)}
-        for code in list(ready.keys()):
-            if st.button(f"✅ {code} PRONTO", key=f"ready_{code}"):
-                if code not in history:
-                    history.insert(0, code)
-                    bucket.blob("metadata/history.json").upload_from_string(json.dumps(history[:20]))
-                del queue[code]
-                bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(queue))
-                st.rerun()
+        st.subheader("⏳ In Sincronizzazione")
+        try:
+            q_blob = bucket.blob("metadata/sync_queue.json")
+            if q_blob.exists():
+                queue = json.loads(q_blob.download_as_text())
+                if not queue: st.caption("Nessuna richiesta.")
+                for code in queue: st.write(f"⏳ {code}...")
+            else: st.caption("Coda non trovata.")
+        except: st.caption("Errore lettura coda.")
 
         st.divider()
-        if history:
-            for old_code in history:
-                if st.button(f"📄 {old_code}", key=f"hist_{old_code}", use_container_width=True):
-                    st.session_state.f1_query = old_code
-                    st.rerun()
+        st.subheader("🕒 Recenti (Scadenza 24h)")
+        try:
+            h_blob = bucket.blob("metadata/history.json")
+            if h_blob.exists():
+                hist = json.loads(h_blob.download_as_text())
+                if not hist: st.caption("Nessuna cronologia.")
+                for entry in hist:
+                    elapsed = time.time() - entry['timestamp_sync']
+                    rem = 24 - int(elapsed / 3600)
+                    if rem > 0:
+                        if st.button(f"📦 {entry['code']} ({rem}h rimaste)", key=f"hist_{entry['code']}", use_container_width=True):
+                            st.session_state.f1_query = entry['code']
+                            st.rerun()
+                    else:
+                        st.caption(f"📦 {entry['code']} (In scadenza...)")
+            else: st.caption("Nessuna cronologia.")
+        except: st.caption("Errore lettura cronologia.")
 
-    # --- INTESTAZIONE ---
+    # --- CORPO CENTRALE ---
     st.image("cover.jpg", use_container_width=True)
-    st.title("🏗️ Portale CAD Centrale")
+    st.title("🏗️ Vault CAD Centrale")
+    t1, t2 = st.tabs(["📤 CHECK-IN", "🔍 CHECK-OUT"])
 
-    tab1, tab2 = st.tabs(["📤 CHECK-IN (Inserimento)", "🔍 CHECK-OUT (Ricerca)"])
-
-    # --- TAB 1: CHECK-IN ---
-    with tab1:
-        st.subheader("Archiviazione Nuovo Articolo")
+    with t1:
+        st.subheader("Nuovo Inserimento")
+        col1, col2 = st.columns(2)
+        with col1: nome_art = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
+        with col2: tags_art = st.text_input("Tag (separati da virgola)")
         
-        col_a, col_b = st.columns(2)
-        with col_a: nome_art = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
-        with col_b: tag_art = st.text_input("Tag", placeholder="separati da virgola")
-
         sel_cat = st.selectbox("Seleziona Categoria", list(CATEGORIE_FISSE.keys()))
-        path_relativo = CATEGORIE_FISSE[sel_cat]
-        codice_mostrato = nome_art if nome_art else "[INSERIRE CODICE]"
-        dest_f = f"D:/ARCHIVIO CAD/{path_relativo}/{codice_mostrato}/"
+        path_rel = CATEGORIE_FISSE[sel_cat]
+        st.info(f"📍 Destinazione: D:/ARCHIVIO CAD/{path_rel}/{nome_art if nome_art else '...'}/")
         
-        st.info(f"📍 **Destinazione:** {dest_f}")
-
-        solo_inbox = st.checkbox("Solo trasferimento (inbox)")
-        caricamento = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
-        
+        files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
         if st.button("🚀 ESEGUI CHECK-IN", use_container_width=True, type="primary"):
-            if nome_art and caricamento:
-                with st.spinner("Invio..."):
-                    task_data = {"nome_articolo": nome_art, "categoria": path_relativo, "tags": tag_art, "solo_trasferimento": solo_inbox, "timestamp": time.time()}
-                    bucket.blob(f"inbox/{nome_art}.json").upload_from_string(json.dumps(task_data, indent=4))
-                    for f in caricamento:
-                        bucket.blob(f"inbox/{nome_art}/{f.name}").upload_from_file(f)
-                    st.success(f"Caricamento avviato per {nome_art}!")
-                    st.toast(f"Archiviazione {nome_art} in corso...")
+            if nome_art and files:
+                with st.spinner("Invio al Cloud..."):
+                    task = {"nome_articolo": nome_art, "percorso_relativo": path_rel, "tags": [t.strip() for t in tags_art.split(',')], "solo_trasferimento": False}
+                    prefix = f"inbox/{nome_art}_{int(time.time())}"
+                    bucket.blob(f"{prefix}/{nome_art}_task.json").upload_from_string(json.dumps(task))
+                    for f in files:
+                        bucket.blob(f"{prefix}/{f.name}").upload_from_string(f.getvalue())
+                    st.success("Richiesta inviata al Bridge locale!")
+                    st.toast("Check-in in corso...")
             else:
-                st.error("Manca il codice articolo o almeno un file!")
+                st.error("Inserisci il codice articolo e almeno un file!")
 
-    # --- TAB 2: CHECK-OUT ---
-    with tab2:
-        st.subheader("Ricerca e Prelievo")
+    with t2:
+        st.subheader("Ricerca nell'Archivio")
+        # Carica l'indice dal cloud
         try:
-            idx_blob = bucket.blob("metadata/archivio_index.json").download_as_text()
-            index_data = json.loads(idx_blob)["components"]
-        except: st.error("Indice non disponibile."); index_data = []
+            idx_blob = bucket.blob("metadata/archivio_index.json")
+            if idx_blob.exists():
+                index_data = json.loads(idx_blob.download_as_text()).get("components", [])
+            else:
+                st.warning("Indice archivio non trovato. Il Bridge deve ancora sincronizzarlo.")
+                index_data = []
+        except:
+            st.error("Errore caricamento indice.")
+            index_data = []
 
         c1, c2 = st.columns(2)
         with c1: 
-            n1 = st.text_input("Ricerca Nome 1", value=st.session_state.f1_query, key="f1").lower()
+            n1 = st.text_input("Ricerca Codice", value=st.session_state.f1_query, key="f1").lower()
             st.session_state.f1_query = ""
-        with c2: n2 = st.text_input("Ricerca Nome 2", key="f2").lower()
-        t1, t2, t3 = st.columns(3)
-        with t1: tag1 = t1.text_input("Tag 1", key="f3").lower()
-        with t2: tag2 = t2.text_input("Tag 2", key="f4").lower()
-        with t3: tag3 = t3.text_input("Tag 3", key="f5").lower()
-
-        filtered = [item for item in index_data if (n1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and n2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower()) and (tag1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag3 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower())]
-        st.info(f"📍 Risultati: {len(filtered)} | Coda: {len(st.session_state.download_queue)}")
+        with c2: n2 = st.text_input("Filtro Categoria/Altro", key="f2").lower()
+        
+        filtered = [item for item in index_data if (n1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and n2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower())]
+        st.info(f"📍 Risultati: {len(filtered)}")
 
         with st.container(height=550, border=False):
             for item in filtered[:st.session_state.limit_results]:
                 with st.container(border=True):
-                    # Layout a 3 colonne: Testo largo, Lente, Plus
-                    c_info, c_view, c_add = st.columns([0.8, 0.1, 0.1])
-                    
-                    with c_info:
+                    c_txt, c_view, c_add = st.columns([0.8, 0.1, 0.1])
+                    with c_txt: 
                         st.markdown(f"**{item['code']}**")
-                        st.caption(f"{item['category']} | Formati: {', '.join(item['formats'])}")
-                    
-                    with c_view:
-                        # LENTE PER ANTEPRIMA
-                        if st.button("🔍", key=f"v_{item['code']}", help="Dettagli e Download Singoli", use_container_width=True):
-                            preview_dialog(item, bucket)
-                    
+                        st.caption(f"{item['category']} | {', '.join(item['formats'])}")
+                    with c_view: 
+                        if st.button("🔍", key=f"v_{item['code']}", help="Dettagli e Download Singoli"):
+                            preview_dialog(item)
                     with c_add:
-                        # PLUS PER SELEZIONE (CAMBIA COLORE AL CLICK TRAMITE CSS)
-                        is_selected = item['code'] in st.session_state.download_queue
-                        # Usiamo un'icona diversa se già selezionato per chiarezza visiva
-                        icon = "✅" if is_selected else "➕"
-                        if st.button(icon, key=f"a_{item['code']}", help="Aggiungi al carrello download", use_container_width=True):
-                            if item['code'] not in st.session_state.download_queue:
-                                st.session_state.download_queue.add(item['code'])
-                                st.toast(f"{item['code']} aggiunto!")
-                                st.rerun()
-                            else:
-                                st.session_state.download_queue.remove(item['code'])
-                                st.toast(f"Rimosso: {item['code']}")
-                                st.rerun()
+                        if st.button("➕", key=f"a_{item['code']}", help="Richiedi Sincronizzazione Cloud"):
+                            try:
+                                q_blob = bucket.blob("metadata/sync_queue.json")
+                                queue = json.loads(q_blob.download_as_text()) if q_blob.exists() else {}
+                                queue[item['code']] = {"synced": False, "formats": item['formats'], "timestamp": time.time()}
+                                q_blob.upload_from_string(json.dumps(queue))
+                                st.toast(f"Richiesta sync inviata per {item['code']}")
+                            except: st.error("Errore invio sync.")
 
         if len(filtered) > st.session_state.limit_results:
             st.button("Mostra altri risultati...", on_click=show_more)
-
-        st.write("---")
-        if st.button("🚀 GENERA LINK PER DOWNLOAD (ZIP)", type="primary", use_container_width=True):
-            if st.session_state.download_queue:
-                req_id = int(time.time())
-                bucket.blob(f"requests/req_{req_id}.json").upload_from_string(json.dumps({"items": list(st.session_state.download_queue), "request_id": req_id, "timestamp": time.time()}, indent=4))
-                st.session_state['last_req_id'] = req_id
-                st.success(f"Richiesta {req_id} inviata.")
-            else: st.error("Coda vuota.")
-        
-        if 'last_req_id' in st.session_state:
-            res_blob = bucket.blob(f"responses/{st.session_state['last_req_id']}.json")
-            if res_blob.exists():
-                res_data = json.loads(res_blob.download_as_text())
-                st.link_button("🔥 SCARICA ZIP PRONTO", res_data['url'], use_container_width=True)
-                if st.button("Svuota coda"): st.session_state.download_queue.clear(); st.rerun()
-            else:
-                if st.button("🔄 AGGIORNA STATO PRELIEVO"): st.rerun()
