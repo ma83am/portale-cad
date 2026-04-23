@@ -71,7 +71,7 @@ if check_password():
     client = storage.Client.from_service_account_info(gcp_info)
     bucket = client.bucket(BUCKET_NAME)
 
-    # --- SIDEBAR: STATUS, CODA E RECENTI ---
+    # --- SIDEBAR: DASHBOARD ---
     queue, history = get_sync_data(bucket)
     with st.sidebar:
         st.subheader("📡 Stato Sistema")
@@ -121,11 +121,25 @@ if check_password():
         </style>
         """, unsafe_allow_html=True)
 
-    # --- LOGICA CATEGORIE A CASCATA ---
+    # --- CARICAMENTO MAPPA CATEGORIE (BLINDATO) ---
     try:
-        cat_map = json.loads(bucket.blob("metadata/categories.json").download_as_text())
-    except:
-        cat_map = {"1_ASSIEMI": [], "4_COMMERCIALI": ["A CATALOGO", "GENERICI"]}
+        cat_blob = bucket.blob("metadata/categories.json")
+        raw_cats = json.loads(cat_blob.download_as_text())
+        
+        # Se è una lista (vecchio formato), la convertiamo al volo in dizionario
+        if isinstance(raw_cats, list):
+            cat_map = {c: [] for c in raw_cats}
+        else:
+            cat_map = raw_cats
+    except Exception:
+        # Se il file non esiste ancora o c'è un errore, usiamo un fallback sicuro
+        cat_map = {
+            "1_ASSIEMI": [], 
+            "2_GRUPPI": [], 
+            "3_COMPONENTI A DISEGNO": [],
+            "4_COMMERCIALI": ["A CATALOGO", "COMMERCIALI_LAVORATI", "GENERICI"],
+            "9_NON CLASSIFICATI": []
+        }
 
     tab1, tab2 = st.tabs(["📤 CHECK-IN (Inserimento)", "🔍 CHECK-OUT (Ricerca)"])
 
@@ -138,7 +152,8 @@ if check_password():
             with c2: tags = st.text_input("Tag (es. saldato, rulliera, AISI304)")
 
             # BOX 1: Selezione cartella principale
-            main_cat = st.selectbox("Seleziona Cartella Principale", list(cat_map.keys()))
+            main_categories = list(cat_map.keys())
+            main_cat = st.selectbox("Seleziona Cartella Principale", main_categories)
             
             # BOX 2: Selezione sottocartella (appare solo se esistono sub-folders)
             subs = cat_map.get(main_cat, [])
@@ -147,9 +162,9 @@ if check_password():
                 sub_cat = st.selectbox("Seleziona Sottocartella", subs)
                 full_cat = f"{main_cat}/{sub_cat}"
             
-            st.info(f"📍 Destinazione finale: D:/ARCHIVIO CAD/{full_cat}/{nome}")
+            st.info(f"📍 Destinazione: D:/ARCHIVIO CAD/{full_cat}/{nome}")
             
-            solo_tra = st.checkbox("Solo trasferimento (parcheggia in inbox senza archiviare)")
+            solo_tra = st.checkbox("Solo trasferimento (inbox)")
             files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
             
             if st.form_submit_button("ESEGUI CHECK-IN"):
@@ -159,7 +174,7 @@ if check_password():
                         bucket.blob(f"inbox/{nome}.json").upload_from_string(json.dumps(task_data, indent=4))
                         for f in files:
                             bucket.blob(f"inbox/{nome}/{f.name}").upload_from_file(f)
-                        st.success("Invio completato. Il Bridge archivierà i file tra pochi secondi.")
+                        st.success("Richiesta inviata.")
                 else: st.error("Dati incompleti.")
 
     # --- TAB 2: CHECK-OUT ---

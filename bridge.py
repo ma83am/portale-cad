@@ -13,30 +13,37 @@ INBOX_ROOT = os.path.join(BASE_PATH, "0_FILE DA PROCESSARE")
 CLOUD_INBOX = os.path.join(INBOX_ROOT, "CLOUD_INBOX")
 
 def update_remote_metadata(bucket):
-    """Crea una mappa dinamica Main_Folder -> [Sub_Folders] e invia Heartbeat."""
-    exclude = ['0_FILE DA PROCESSARE', 'scripts', 'procedures', '.streamlit', 'secrets']
+    """Crea la mappa delle cartelle e sottocartelle in formato DIZIONARIO (Bulletproof)."""
+    exclude = ['0_FILE DA PROCESSARE', 'scripts', 'procedures', '.streamlit', 'secrets', 'archive', 'metadata']
     category_map = {}
     
     if not os.path.exists(BASE_PATH):
         print(f"⚠️ BASE_PATH non trovato: {BASE_PATH}")
         return
 
+    # Scansione del disco D:
     for d in os.listdir(BASE_PATH):
         full_path = os.path.join(BASE_PATH, d)
-        if os.path.isdir(full_path) and d not in exclude and not d.startswith('.'):
-            # Cerca sottocartelle reali (es. in 4_COMMERCIALI)
+        # Consideriamo solo le cartelle principali numerate (es. 1_ASSIEMI) e non escluse
+        if os.path.isdir(full_path) and d[0].isdigit() and d not in exclude:
+            # Cerchiamo sottocartelle reali (es. dentro 4_COMMERCIALI)
             subs = [s for s in os.listdir(full_path) 
                     if os.path.isdir(os.path.join(full_path, s)) and not s.startswith('.')]
             category_map[d] = subs
             
-    bucket.blob("metadata/categories.json").upload_from_string(json.dumps(category_map))
-    # Heartbeat integrato
-    bucket.blob("metadata/heartbeat.json").upload_from_string(json.dumps({"last_seen": time.time()}))
-    print(f"🔄 Mappa categorie ({len(category_map)} main) e Heartbeat sincronizzati.")
+    # Caricamento sul Cloud
+    bucket.blob("metadata/categories.json").upload_from_string(
+        json.dumps(category_map), 
+        content_type='application/json'
+    )
+    # Heartbeat per lo stato Online
+    bucket.blob("metadata/heartbeat.json").upload_from_string(
+        json.dumps({"last_seen": time.time()})
+    )
+    print(f"🔄 Mappa categorie aggiornata ({len(category_map)} main): {list(category_map.keys())}")
 
 def archive_new_item(temp_folder, nome, categoria_completa, tags):
     """Sposta i file dal CLOUD_INBOX alla cartella finale e aggiorna l'indice."""
-    # categoria_completa può essere "4_COMMERCIALI/A CATALOGO" o "1_ASSIEMI"
     dest_dir = os.path.join(BASE_PATH, categoria_completa.replace("/", "\\"), nome)
     os.makedirs(dest_dir, exist_ok=True)
     
@@ -45,29 +52,23 @@ def archive_new_item(temp_folder, nome, categoria_completa, tags):
     
     for f in os.listdir(temp_folder):
         if f.endswith('.json'): continue
-        
         ext = f.split('.')[-1].upper()
         nuovo_nome = f"{nome}.{ext.lower()}"
         source_f = os.path.join(temp_folder, f)
         dest_f = os.path.join(dest_dir, nuovo_nome)
-        
         try:
             shutil.move(source_f, dest_f)
             formats.append(ext)
             if ext in ['STP', 'STEP', 'IAM', 'ASM', 'DWG', 'SLDPRT']:
                 main_file_path = dest_f
-        except Exception as e:
-            print(f"⚠️ Errore spostamento {f}: {e}")
+        except Exception as e: print(f"⚠️ Errore spostamento {f}: {e}")
             
-    # Aggiorna il file archivio.json locale
     idx_path = os.path.join(BASE_PATH, "archivio.json")
     if os.path.exists(idx_path):
         try:
             with open(idx_path, 'r+') as f:
                 db = json.load(f)
-                # Rimuovi entry esistenti
                 db['components'] = [c for c in db.get('components', []) if c['code'] != nome]
-                
                 db['components'].append({
                     "code": nome,
                     "category": categoria_completa,
@@ -80,9 +81,7 @@ def archive_new_item(temp_folder, nome, categoria_completa, tags):
                 json.dump(db, f, indent=4)
                 f.truncate()
             print(f"✅ Archiviato: {nome} in {categoria_completa}")
-        except Exception as e:
-            print(f"❌ Errore aggiornamento indice: {e}")
-    
+        except Exception as e: print(f"❌ Errore indice: {e}")
     return dest_dir
 
 def sync_previews(bucket):
@@ -118,29 +117,23 @@ def process_cloud_inbox(bucket):
             categoria = data.get('categoria', 'NON_CATEGORIZZATO')
             tags = data.get('tags', [])
             solo_trasferimento = data.get('solo_trasferimento', False)
-            
             temp_path = os.path.join(INBOX_ROOT, "TEMP_" + nome)
             os.makedirs(temp_path, exist_ok=True)
-            
             prefix = t_blob.name.replace('_task.json', '/')
             for b in blobs:
                 if b.name.startswith(prefix):
                     b.download_to_filename(os.path.join(temp_path, os.path.basename(b.name)))
                     b.delete()
-            
             if solo_trasferimento:
                 final_inbox = os.path.join(CLOUD_INBOX, nome)
                 os.makedirs(final_inbox, exist_ok=True)
-                for f in os.listdir(temp_path):
-                    shutil.move(os.path.join(temp_path, f), os.path.join(final_inbox, f))
+                for f in os.listdir(temp_path): shutil.move(os.path.join(temp_path, f), os.path.join(final_inbox, f))
                 shutil.rmtree(temp_path)
-                print(f"🚚 Articolo {nome} parcheggiato in CLOUD_INBOX.")
             else:
                 archive_new_item(temp_path, nome, categoria, ", ".join(tags) if isinstance(tags, list) else tags)
                 shutil.rmtree(temp_path)
-                
             t_blob.delete()
-        except Exception as e: print(f"❌ Errore process_cloud_inbox: {e}")
+        except Exception as e: print(f"❌ Errore inbox: {e}")
 
 def handle_checkout(bucket):
     """Prepara gli ZIP per il download."""
@@ -164,26 +157,22 @@ def handle_checkout(bucket):
                         if item_p and os.path.exists(item_p):
                             d = os.path.dirname(item_p)
                             for root, _, files in os.walk(d):
-                                for f in files:
-                                    fp = os.path.join(root, f)
-                                    z.write(fp, os.path.relpath(fp, os.path.dirname(d)))
+                                for f in files: z.write(os.path.join(root, f), os.path.relpath(os.path.join(root, f), os.path.dirname(d)))
             out = bucket.blob(f"downloads/{zip_name}")
             out.upload_from_filename(zip_p)
             url = out.generate_signed_url(version="v4", expiration=600, method="GET")
             bucket.blob(f"responses/{req_id}.json").upload_from_string(json.dumps({"url": url}))
             r_blob.delete()
-            print(f"📦 ZIP pronto per {req_id}")
-    except Exception as e: print(f"❌ Errore handle_checkout: {e}")
+    except Exception as e: print(f"❌ Errore checkout: {e}")
 
 def handle_urgent_requests(bucket):
-    """Sincronizzazione prioritaria per richieste web."""
+    """Sincronizzazione prioritaria."""
     index_path = os.path.join(BASE_PATH, "archivio.json")
     queue_blob = bucket.blob("metadata/sync_queue.json")
     if not queue_blob.exists() or not os.path.exists(index_path): return
     try:
         queue = json.loads(queue_blob.download_as_text())
-        with open(index_path, 'r') as f:
-            db_locale = json.load(f).get('components', [])
+        with open(index_path, 'r') as f: db_locale = json.load(f).get('components', [])
         updated = False
         for item_code, details in list(queue.items()):
             if not details.get('synced', False):
@@ -192,17 +181,14 @@ def handle_urgent_requests(bucket):
                     folder = os.path.dirname(match['path'])
                     for fmt in details.get('formats', []):
                         local_f = os.path.join(folder, f"{item_code}.{fmt.lower()}")
-                        if os.path.exists(local_f):
-                            cloud_p = f"archive/{item_code}/{item_code}.{fmt.lower()}"
-                            bucket.blob(cloud_p).upload_from_filename(local_f)
+                        if os.path.exists(local_f): bucket.blob(f"archive/{item_code}/{item_code}.{fmt.lower()}").upload_from_filename(local_f)
                     queue[item_code]['synced'] = True
                     updated = True
-                    print(f"⚡ Sincronizzazione URGENTE: {item_code}")
         if updated: queue_blob.upload_from_string(json.dumps(queue))
-    except Exception as e: print(f"⚠️ Errore handle_urgent_requests: {e}")
+    except Exception as e: print(f"⚠️ Errore urgent: {e}")
 
 def cleanup_previews(bucket, limit_gb=5):
-    """Pulisce anteprime vecchie."""
+    """Pulisce cloud."""
     blobs = list(bucket.list_blobs(prefix="archive/"))
     total_size = sum(b.size for b in blobs)
     limit_bytes = limit_gb * 1024**3
@@ -211,26 +197,16 @@ def cleanup_previews(bucket, limit_gb=5):
         current_size = total_size
         for b in blobs:
             if current_size <= limit_bytes: break
-            sz = b.size
-            b.delete()
-            current_size -= sz
-            print(f"🗑️ Pulizia: {b.name}")
+            sz = b.size; b.delete(); current_size -= sz
 
 if __name__ == "__main__":
-    import sys
-    import io
-    if sys.platform == "win32":
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    print("🚀 Bridge 3.4 Operativo (Cascading Categories Map)...")
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
+    import sys; import io
+    if sys.platform == "win32": sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    print("🚀 Bridge 3.4.1 Operativo (Bulletproof Scanning Engine)...")
+    client = storage.Client(); bucket = client.bucket(BUCKET_NAME)
     while True:
         try:
             update_remote_metadata(bucket)
-            sync_previews(bucket)
-            process_cloud_inbox(bucket)
-            handle_checkout(bucket)
-            handle_urgent_requests(bucket)
-            cleanup_previews(bucket, 5)
+            sync_previews(bucket); process_cloud_inbox(bucket); handle_checkout(bucket); handle_urgent_requests(bucket); cleanup_previews(bucket, 5)
         except Exception as e: print(f"❌ Errore nel ciclo: {e}")
         time.sleep(30)
