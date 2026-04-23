@@ -116,7 +116,10 @@ if check_password():
         .stTabs [data-baseweb="tab-list"] { gap: 2px; background-color: #dee2e6; padding: 5px 5px 0px 5px; border-radius: 5px 5px 0 0; }
         .stTabs [data-baseweb="tab"] { background-color: #e9ecef; border: none; padding: 10px 20px; color: #495057 !important; font-weight: 500 !important; border-radius: 5px 5px 0 0; }
         .stTabs [aria-selected="true"] { background-color: #ffffff !important; color: #1a73e8 !important; border-bottom: 3px solid #1a73e8 !important; }
-        .stButton>button { background-color: #1a73e8; color: white !important; border-radius: 4px; border: none; font-weight: 500; height: 40px; }
+        .stButton>button { border-radius: 4px; font-weight: 500; height: 40px; }
+        /* Pulsante primario (Selezione) */
+        .stButton>button[kind="primary"] { background-color: #e3f2fd; color: #1a73e8 !important; border: 1px solid #1a73e8; }
+        .stButton>button[kind="primary"]:hover { background-color: #1a73e8; color: white !important; }
         label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
         </style>
         """, unsafe_allow_html=True)
@@ -124,22 +127,10 @@ if check_password():
     # --- CARICAMENTO MAPPA CATEGORIE (BLINDATO) ---
     try:
         cat_blob = bucket.blob("metadata/categories.json")
-        raw_cats = json.loads(cat_blob.download_as_text())
-        
-        # Se è una lista (vecchio formato), la convertiamo al volo in dizionario
-        if isinstance(raw_cats, list):
-            cat_map = {c: [] for c in raw_cats}
-        else:
-            cat_map = raw_cats
-    except Exception:
-        # Se il file non esiste ancora o c'è un errore, usiamo un fallback sicuro
-        cat_map = {
-            "1_ASSIEMI": [], 
-            "2_GRUPPI": [], 
-            "3_COMPONENTI A DISEGNO": [],
-            "4_COMMERCIALI": ["A CATALOGO", "COMMERCIALI_LAVORATI", "GENERICI"],
-            "9_NON CLASSIFICATI": []
-        }
+        raw_data = json.loads(cat_blob.download_as_text())
+        cat_map = raw_data if isinstance(raw_data, dict) else {c: [] for c in raw_data}
+    except:
+        cat_map = {"1_ASSIEMI": [], "4_COMMERCIALI": ["A CATALOGO", "GENERICI"]}
 
     tab1, tab2 = st.tabs(["📤 CHECK-IN (Inserimento)", "🔍 CHECK-OUT (Ricerca)"])
 
@@ -147,34 +138,34 @@ if check_password():
     with tab1:
         st.subheader("Archiviazione Nuovo Articolo")
         with st.form("form_checkin", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1: nome = st.text_input("Codice Articolo (es. GUIDA_PALLET_L1500)")
-            with c2: tags = st.text_input("Tag (es. saldato, rulliera, AISI304)")
+            col_a, col_b = st.columns(2)
+            with col_a: nome = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
+            with col_b: tags = st.text_input("Tag", placeholder="separati da virgola")
 
-            # BOX 1: Selezione cartella principale
+            # BOX 1: Principale
             main_categories = list(cat_map.keys())
             main_cat = st.selectbox("Seleziona Cartella Principale", main_categories)
             
-            # BOX 2: Selezione sottocartella (appare solo se esistono sub-folders)
+            # BOX 2: Sottocategoria (appare dinamicamente)
             subs = cat_map.get(main_cat, [])
             full_cat = main_cat
             if subs:
                 sub_cat = st.selectbox("Seleziona Sottocartella", subs)
                 full_cat = f"{main_cat}/{sub_cat}"
             
-            st.info(f"📍 Destinazione: D:/ARCHIVIO CAD/{full_cat}/{nome}")
+            st.info(f"📍 Destinazione: D:/ARCHIVIO CAD/{full_cat}/{nome}/")
             
             solo_tra = st.checkbox("Solo trasferimento (inbox)")
             files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
             
-            if st.form_submit_button("ESEGUI CHECK-IN"):
+            if st.form_submit_button("ESEGUI CHECK-IN", type="primary"):
                 if files and nome:
                     with st.spinner("Invio..."):
                         task_data = {"nome_articolo": nome, "categoria": full_cat, "tags": tags, "solo_trasferimento": solo_tra, "timestamp": time.time()}
                         bucket.blob(f"inbox/{nome}.json").upload_from_string(json.dumps(task_data, indent=4))
                         for f in files:
                             bucket.blob(f"inbox/{nome}/{f.name}").upload_from_file(f)
-                        st.success("Richiesta inviata.")
+                        st.success("Richiesta inviata correttamente.")
                 else: st.error("Dati incompleti.")
 
     # --- TAB 2: CHECK-OUT ---
@@ -198,26 +189,37 @@ if check_password():
         filtered = [item for item in index_data if (n1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and n2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower()) and (tag1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag3 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower())]
         st.info(f"📍 Risultati: {len(filtered)} | Coda: {len(st.session_state.download_queue)}")
 
-        with st.container(height=500, border=True):
+        # --- RISULTATI RICERCA ---
+        with st.container(height=550, border=False):
             for item in filtered[:st.session_state.limit_results]:
-                col_info, col_btn_pre, col_btn_sel = st.columns([4, 1, 1])
-                with col_info:
-                    st.write(f"📦 **{item['code']}**")
-                    st.caption(f"{item['category']} | Tags: {', '.join(item['tags'][:3])}...")
-                with col_btn_pre:
-                    if st.button("👁️ Anteprima", key=f"pre_{item['code']}"): preview_dialog(item, bucket)
-                with col_btn_sel:
-                    is_selected = item['code'] in st.session_state.download_queue
-                    if st.button("✅" if is_selected else "📥", key=f"sel_{item['code']}", type="secondary" if is_selected else "primary"):
-                        if is_selected: st.session_state.download_queue.remove(item['code'])
-                        else: st.session_state.download_queue.add(item['code'])
-                        st.rerun()
+                # Creiamo una "scheda" pulita per ogni articolo
+                with st.container(border=True):
+                    c_txt, c_ant, c_sel = st.columns([4, 1, 1])
+                    
+                    with c_txt:
+                        st.markdown(f"📦 **{item['code']}**")
+                        st.caption(f"{item['category']} | {', '.join(item['tags'][:3])}...")
+                    
+                    with c_ant:
+                        # Pulsante Info: Grigio/Bianco
+                        if st.button("👁️ Info", key=f"pre_{item['code']}", use_container_width=True, type="secondary"):
+                            preview_dialog(item, bucket)
+                    
+                    with c_sel:
+                        is_selected = item['code'] in st.session_state.download_queue
+                        # Pulsante Selezione: Azzurro molto chiaro o Pieno
+                        if st.button("✅" if is_selected else "📥 Sel.", key=f"sel_{item['code']}", use_container_width=True, type="primary"):
+                            if is_selected: st.session_state.download_queue.remove(item['code'])
+                            else: 
+                                st.session_state.download_queue.add(item['code'])
+                                st.toast(f"Aggiunto: {item['code']}")
+                            st.rerun()
 
         if len(filtered) > st.session_state.limit_results:
             st.button("Mostra altri risultati...", on_click=show_more)
 
         st.write("---")
-        if st.button("🚀 GENERA LINK PER DOWNLOAD (ZIP)"):
+        if st.button("🚀 GENERA LINK PER DOWNLOAD (ZIP)", type="primary", use_container_width=True):
             if st.session_state.download_queue:
                 req_id = int(time.time())
                 bucket.blob(f"requests/req_{req_id}.json").upload_from_string(json.dumps({"items": list(st.session_state.download_queue), "request_id": req_id, "timestamp": time.time()}, indent=4))
@@ -229,7 +231,7 @@ if check_password():
             res_blob = bucket.blob(f"responses/{st.session_state['last_req_id']}.json")
             if res_blob.exists():
                 res_data = json.loads(res_blob.download_as_text())
-                st.link_button("🔥 SCARICA ZIP", res_data['url'], use_container_width=True)
+                st.link_button("🔥 SCARICA ZIP PRONTO", res_data['url'], use_container_width=True)
                 if st.button("Svuota coda"): st.session_state.download_queue.clear(); st.rerun()
             else:
-                if st.button("🔄 AGGIORNA"): st.rerun()
+                if st.button("🔄 AGGIORNA STATO PRELIEVO"): st.rerun()
