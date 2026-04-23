@@ -21,6 +21,38 @@ CATEGORIE_FISSE = {
 BUCKET_NAME = "cad-vault-marco"
 st.set_page_config(page_title="PORTALE CAD", layout="wide", page_icon="🏗️")
 
+# --- STYLE CUSTOM (ICONE E TRANSIZIONI) ---
+st.markdown("""
+    <style>
+    /* Rimuove i bordi e lo sfondo dai bottoni delle icone in colonna */
+    div[data-testid="column"] button {
+        border: none !important;
+        background-color: transparent !important;
+        padding: 0px !important;
+        font-size: 24px !important;
+        transition: transform 0.2s, color 0.2s;
+        box-shadow: none !important;
+    }
+    /* Effetto ingrandimento al passaggio del mouse */
+    div[data-testid="column"] button:hover {
+        transform: scale(1.3);
+        color: #0078D4 !important;
+        background-color: transparent !important;
+    }
+    /* Stile specifico per il tasto + quando cliccato (attivo) */
+    div[data-testid="column"] button:active {
+        color: #28a745 !important;
+        transform: scale(0.95);
+    }
+    /* Fix per evitare bordi streamlit standard */
+    .stButton>button:focus {
+        box-shadow: none !important;
+        background-color: transparent !important;
+        color: inherit;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # --- LOGICA DI STATO ---
 if "limit_results" not in st.session_state:
     st.session_state.limit_results = 25
@@ -55,28 +87,58 @@ def get_sync_data(bucket):
         return queue, history
     except: return {}, []
 
-@st.dialog("Anteprima Tecnica Articolo", width="large")
+# --- DIALOG ANTEPRIMA (AVANZATO) ---
+@st.dialog("Dettaglio Tecnico", width="large")
 def preview_dialog(item, bucket):
-    st.write(f"🔍 **Dettaglio Codice:** {item['code']}")
-    img_formats = [f for f in item.get('formats', []) if f.upper() in ['JPG', 'PNG', 'JPEG']]
+    st.subheader(f"📦 {item['code']}")
+    
+    # 1. VISUALIZZAZIONE IMMAGINE (PNG/JPG)
+    img_formats = [f for f in item.get('formats', []) if f.upper() in ['PNG', 'JPG', 'JPEG']]
     if img_formats:
         ext = img_formats[0].lower()
-        cloud_path = f"archive/{item['code']}/{item['code']}.{ext}"
+        cloud_img = f"archive/{item['code']}/{item['code']}.{ext}"
         try:
-            blob = bucket.blob(cloud_path)
-            img_bytes = blob.download_as_bytes()
-            st.image(img_bytes) 
-            st.download_button("💾 Scarica questa immagine", img_bytes, file_name=f"{item['code']}.jpg")
+            blob = bucket.blob(cloud_img)
+            st.image(blob.download_as_bytes(), caption=f"Anteprima di {item['code']}")
         except:
-            st.error("L'immagine non è ancora disponibile nel Cloud.")
+            st.warning("Immagine non trovata sul Cloud. Il Bridge potrebbe essere in ritardo.")
             if st.button("🚀 Richiedi Sincronizzazione Urgente"):
                 q, h = get_sync_data(bucket)
                 q[item['code']] = {"synced": False, "formats": img_formats, "timestamp": time.time()}
                 bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(q))
                 st.success("Richiesta inviata!")
-    else: st.warning("Nessuna anteprima disponibile.")
+    else:
+        st.warning("Nessuna anteprima immagine disponibile.")
+    
     st.divider()
-    st.json({"Tag": item.get('tags', []), "Formati": item.get('formats', [])})
+
+    # 2. DOWNLOAD SINGOLI FORMATI
+    st.write("**Scarica singoli file sul dispositivo:**")
+    fmts = item.get('formats', [])
+    if fmts:
+        cols = st.columns(len(fmts))
+        for i, fmt in enumerate(fmts):
+            ext = fmt.lower()
+            cloud_file = f"archive/{item['code']}/{item['code']}.{ext}"
+            with cols[i]:
+                try:
+                    file_blob = bucket.blob(cloud_file)
+                    st.download_button(
+                        label=f"⬇️ {fmt.upper()}",
+                        data=file_blob.download_as_bytes(),
+                        file_name=f"{item['code']}.{ext}",
+                        key=f"dl_single_{item['code']}_{fmt}",
+                        use_container_width=True,
+                        help=f"Scarica il file .{ext}"
+                    )
+                except:
+                    st.button(f"🚫 {fmt}", disabled=True, help="File non disponibile per il download diretto")
+    else:
+        st.caption("Nessun file disponibile per il download diretto.")
+
+    st.divider()
+    st.write(f"**Tag associati:** {', '.join(item.get('tags', []))}")
+    st.caption(f"Percorso Archivio: {item.get('category', 'N/D')}")
 
 # --- LOGICA PRINCIPALE ---
 if check_password():
@@ -122,18 +184,6 @@ if check_password():
     st.image("cover.jpg", use_container_width=True)
     st.title("🏗️ Portale CAD Centrale")
 
-    # CSS "CLEAN STYLE"
-    st.markdown("""
-        <style>
-        .stApp { background-color: #f8f9fa; }
-        .stTabs [data-baseweb="tab-list"] { gap: 2px; background-color: #dee2e6; padding: 5px 5px 0px 5px; border-radius: 5px 5px 0 0; }
-        .stTabs [data-baseweb="tab"] { background-color: #e9ecef; border: none; padding: 10px 20px; color: #495057 !important; font-weight: 500 !important; border-radius: 5px 5px 0 0; }
-        .stTabs [aria-selected="true"] { background-color: #ffffff !important; color: #1a73e8 !important; border-bottom: 3px solid #1a73e8 !important; }
-        .stButton>button { border-radius: 4px; font-weight: 500; height: 40px; }
-        label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
-        </style>
-        """, unsafe_allow_html=True)
-
     tab1, tab2 = st.tabs(["📤 CHECK-IN (Inserimento)", "🔍 CHECK-OUT (Ricerca)"])
 
     # --- TAB 1: CHECK-IN ---
@@ -144,15 +194,11 @@ if check_password():
         with col_a: nome_art = st.text_input("Codice Articolo", placeholder="es. GUIDA_PALLET")
         with col_b: tag_art = st.text_input("Tag", placeholder="separati da virgola")
 
-        # Selezione Categoria (fuori da ogni form per aggiornamento live)
         sel_cat = st.selectbox("Seleziona Categoria", list(CATEGORIE_FISSE.keys()))
-        
-        # Calcolo immediato del percorso
         path_relativo = CATEGORIE_FISSE[sel_cat]
         codice_mostrato = nome_art if nome_art else "[INSERIRE CODICE]"
         dest_f = f"D:/ARCHIVIO CAD/{path_relativo}/{codice_mostrato}/"
         
-        # Box Destinazione (Ora si aggiorna al millisecondo)
         st.info(f"📍 **Destinazione:** {dest_f}")
 
         solo_inbox = st.checkbox("Solo trasferimento (inbox)")
@@ -194,31 +240,32 @@ if check_password():
         with st.container(height=550, border=False):
             for item in filtered[:st.session_state.limit_results]:
                 with st.container(border=True):
-                    # Layout a 3 colonne: Testo largo, Icona piccola, Checkbox piccola
-                    c_info, c_icon, c_check = st.columns([0.8, 0.1, 0.1])
+                    # Layout a 3 colonne: Testo largo, Lente, Plus
+                    c_info, c_view, c_add = st.columns([0.8, 0.1, 0.1])
                     
                     with c_info:
-                        st.markdown(f"📦 **{item['code']}**")
-                        st.caption(f"{item['category']} | {', '.join(item['tags'][:2])}...")
+                        st.markdown(f"**{item['code']}**")
+                        st.caption(f"{item['category']} | Formati: {', '.join(item['formats'])}")
                     
-                    with c_icon:
-                        # Solo un'icona per l'anteprima
-                        if st.button("👁️", key=f"p_{item['code']}", help="Vedi Anteprima", use_container_width=True):
+                    with c_view:
+                        # LENTE PER ANTEPRIMA
+                        if st.button("🔍", key=f"v_{item['code']}", help="Dettagli e Download Singoli", use_container_width=True):
                             preview_dialog(item, bucket)
                     
-                    with c_check:
-                        # Quadrato di selezione (Checkbox)
+                    with c_add:
+                        # PLUS PER SELEZIONE (CAMBIA COLORE AL CLICK TRAMITE CSS)
                         is_selected = item['code'] in st.session_state.download_queue
-                        # Nota: st.checkbox ritorna il valore corrente, ma per aggiornare la coda istantaneamente
-                        # usiamo il valore e un ricaricamento se cambia.
-                        sel = st.checkbox("", value=is_selected, key=f"check_{item['code']}", help="Seleziona per Download")
-                        if sel != is_selected:
-                            if sel: 
+                        # Usiamo un'icona diversa se già selezionato per chiarezza visiva
+                        icon = "✅" if is_selected else "➕"
+                        if st.button(icon, key=f"a_{item['code']}", help="Aggiungi al carrello download", use_container_width=True):
+                            if item['code'] not in st.session_state.download_queue:
                                 st.session_state.download_queue.add(item['code'])
-                                st.toast(f"Aggiunto: {item['code']}")
-                            else: 
+                                st.toast(f"{item['code']} aggiunto!")
+                                st.rerun()
+                            else:
                                 st.session_state.download_queue.remove(item['code'])
-                            st.rerun()
+                                st.toast(f"Rimosso: {item['code']}")
+                                st.rerun()
 
         if len(filtered) > st.session_state.limit_results:
             st.button("Mostra altri risultati...", on_click=show_more)
