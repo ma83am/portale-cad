@@ -33,7 +33,6 @@ def check_password():
         return False
     return True
 
-# --- FUNZIONI DI SUPPORTO ---
 def get_sync_data(bucket):
     try:
         q_blob = bucket.blob("metadata/sync_queue.json")
@@ -56,7 +55,7 @@ def preview_dialog(item, bucket):
             st.image(img_bytes) 
             st.download_button("💾 Scarica questa immagine", img_bytes, file_name=f"{item['code']}.jpg")
         except:
-            st.error("L'immagine non è ancora stata caricata nel Cloud dal Bridge locale.")
+            st.error("L'immagine non è ancora disponibile nel Cloud.")
             if st.button("🚀 Richiedi Sincronizzazione Urgente"):
                 q, h = get_sync_data(bucket)
                 q[item['code']] = {"synced": False, "formats": img_formats, "timestamp": time.time()}
@@ -75,20 +74,20 @@ if check_password():
     # --- SIDEBAR: STATUS, CODA E RECENTI ---
     queue, history = get_sync_data(bucket)
     with st.sidebar:
-        st.subheader("📡 Connessione Archivio")
+        st.subheader("📡 Stato Sistema")
         try:
             hb = json.loads(bucket.blob("metadata/heartbeat.json").download_as_text())
-            status = "🟢 ONLINE (PC H24)" if (time.time() - hb['last_seen']) < 120 else "🔴 OFFLINE"
-        except: status = "⚪ SCONOSCIUTO"
-        st.markdown(f"Stato: **{status}**")
+            if (time.time() - hb['last_seen']) < 120:
+                st.success("🟢 PC ARCHIVIO ONLINE")
+            else: st.error("🔴 PC ARCHIVIO OFFLINE")
+        except: st.warning("⚪ STATO NON DISPONIBILE")
         
         st.divider()
-        st.subheader("⏳ In Sincronizzazione")
+        st.subheader("⏳ Coda Sync / 🕒 Recenti")
         pending = {k: v for k, v in queue.items() if not v.get('synced', False)}
-        if not pending: st.caption("Nessuna richiesta pendente.")
-        else:
-            for code in pending: st.info(f"**{code}**\nAttendere Bridge...")
-
+        if pending:
+            for code in pending: st.info(f"**{code}**\nSincronizzazione...")
+        
         ready = {k: v for k, v in queue.items() if v.get('synced', False)}
         for code in list(ready.keys()):
             if st.button(f"✅ {code} PRONTO", key=f"ready_{code}"):
@@ -100,14 +99,13 @@ if check_password():
                 st.rerun()
 
         st.divider()
-        st.subheader("🕒 Recenti")
-        if not history: st.caption("Nessun articolo recente.")
-        for old_code in history:
-            if st.button(f"📄 {old_code}", key=f"hist_{old_code}", use_container_width=True):
-                st.session_state.f1_query = old_code
-                st.rerun()
+        if history:
+            for old_code in history:
+                if st.button(f"📄 {old_code}", key=f"hist_{old_code}", use_container_width=True):
+                    st.session_state.f1_query = old_code
+                    st.rerun()
 
-    # --- LOGO E TITOLO ---
+    # --- INTESTAZIONE ---
     st.image("cover.jpg", use_container_width=True)
     st.title("🏗️ Portale CAD Centrale")
 
@@ -123,34 +121,45 @@ if check_password():
         </style>
         """, unsafe_allow_html=True)
 
-    # --- CATEGORIE ---
+    # --- LOGICA CATEGORIE A CASCATA ---
     try:
-        lista_categorie = json.loads(bucket.blob("metadata/categories.json").download_as_text())
-    except: lista_categorie = ["1_ASSIEMI", "2_CARPENTERIA", "4_COMMERCIALI/A CATALOGO"]
+        cat_map = json.loads(bucket.blob("metadata/categories.json").download_as_text())
+    except:
+        cat_map = {"1_ASSIEMI": [], "4_COMMERCIALI": ["A CATALOGO", "GENERICI"]}
 
-    tab1, tab2 = st.tabs(["📤 CHECK-IN", "🔍 CHECK-OUT"])
+    tab1, tab2 = st.tabs(["📤 CHECK-IN (Inserimento)", "🔍 CHECK-OUT (Ricerca)"])
 
     # --- TAB 1: CHECK-IN ---
     with tab1:
-        st.subheader("Nuovo Inserimento / Archiviazione")
+        st.subheader("Archiviazione Nuovo Articolo")
         with st.form("form_checkin", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                nome_articolo = st.text_input("Codice Articolo")
-                categoria = st.selectbox("Categoria", lista_categorie)
-            with col2:
-                tags = st.text_input("Tag (separati da virgola)")
-                solo_trasferimento = st.checkbox("Solo trasferimento (parcheggia in inbox senza archiviare)", value=False)
-            note = st.text_area("Note Tecniche")
-            upload_files = st.file_uploader("Trascina i file qui", accept_multiple_files=True)
+            c1, c2 = st.columns(2)
+            with c1: nome = st.text_input("Codice Articolo (es. GUIDA_PALLET_L1500)")
+            with c2: tags = st.text_input("Tag (es. saldato, rulliera, AISI304)")
+
+            # BOX 1: Selezione cartella principale
+            main_cat = st.selectbox("Seleziona Cartella Principale", list(cat_map.keys()))
+            
+            # BOX 2: Selezione sottocartella (appare solo se esistono sub-folders)
+            subs = cat_map.get(main_cat, [])
+            full_cat = main_cat
+            if subs:
+                sub_cat = st.selectbox("Seleziona Sottocartella", subs)
+                full_cat = f"{main_cat}/{sub_cat}"
+            
+            st.info(f"📍 Destinazione finale: D:/ARCHIVIO CAD/{full_cat}/{nome}")
+            
+            solo_tra = st.checkbox("Solo trasferimento (parcheggia in inbox senza archiviare)")
+            files = st.file_uploader("Trascina i file dell'articolo", accept_multiple_files=True)
+            
             if st.form_submit_button("ESEGUI CHECK-IN"):
-                if upload_files and nome_articolo:
-                    with st.spinner("Sincronizzazione..."):
-                        task_data = {"nome_articolo": nome_articolo, "categoria": categoria, "tags": [t.strip() for t in tags.split(",")],"note": note, "solo_trasferimento": solo_trasferimento, "timestamp": time.time()}
-                        bucket.blob(f"inbox/{nome_articolo}.json").upload_from_string(json.dumps(task_data, indent=4))
-                        for f in upload_files:
-                            bucket.blob(f"inbox/{nome_articolo}/{f.name}").upload_from_file(f)
-                        st.success(f"Richiesta inviata. Il Bridge sta lavorando su {nome_articolo}...")
+                if files and nome:
+                    with st.spinner("Invio..."):
+                        task_data = {"nome_articolo": nome, "categoria": full_cat, "tags": tags, "solo_trasferimento": solo_tra, "timestamp": time.time()}
+                        bucket.blob(f"inbox/{nome}.json").upload_from_string(json.dumps(task_data, indent=4))
+                        for f in files:
+                            bucket.blob(f"inbox/{nome}/{f.name}").upload_from_file(f)
+                        st.success("Invio completato. Il Bridge archivierà i file tra pochi secondi.")
                 else: st.error("Dati incompleti.")
 
     # --- TAB 2: CHECK-OUT ---
@@ -172,7 +181,7 @@ if check_password():
         with t3: tag3 = t3.text_input("Tag 3", key="f5").lower()
 
         filtered = [item for item in index_data if (n1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and n2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower()) and (tag1 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag2 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower() and tag3 in (item.get('code', '') + " " + " ".join(item.get('tags', []))).lower())]
-        st.info(f"📍 Risultati: {len(filtered)} | Coda prelievo: {len(st.session_state.download_queue)}")
+        st.info(f"📍 Risultati: {len(filtered)} | Coda: {len(st.session_state.download_queue)}")
 
         with st.container(height=500, border=True):
             for item in filtered[:st.session_state.limit_results]:
@@ -184,7 +193,7 @@ if check_password():
                     if st.button("👁️ Anteprima", key=f"pre_{item['code']}"): preview_dialog(item, bucket)
                 with col_btn_sel:
                     is_selected = item['code'] in st.session_state.download_queue
-                    if st.button("✅ Selezionato" if is_selected else "📥 Seleziona", key=f"sel_{item['code']}", type="secondary" if is_selected else "primary"):
+                    if st.button("✅" if is_selected else "📥", key=f"sel_{item['code']}", type="secondary" if is_selected else "primary"):
                         if is_selected: st.session_state.download_queue.remove(item['code'])
                         else: st.session_state.download_queue.add(item['code'])
                         st.rerun()
