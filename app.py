@@ -19,12 +19,15 @@ CATEGORIE_FISSE = {
 
 # --- CONFIGURAZIONE CORE ---
 BUCKET_NAME = "cad-vault-marco"
+LIMIT_TOTAL_GB = 4.5
+LIMIT_IMAGES_MB = 500.0
+
 st.set_page_config(page_title="Vault CAD Marco", layout="wide", page_icon="🏗️")
 
-# --- CSS REFINEMENT (Version 4.4) ---
+# --- CSS REFINEMENT (Version 4.5) ---
 st.markdown("""
     <style>
-    /* Icone minimali per i bottoni in colonna */
+    /* Icone minimali */
     div[data-testid="column"] button { 
         border: none !important; 
         background-color: transparent !important; 
@@ -35,12 +38,15 @@ st.markdown("""
     }
     div[data-testid="column"] button:hover { transform: scale(1.3); color: #0078D4 !important; }
     
-    /* Pulsanti Sidebar e Bulk */
-    .stButton > button { width: 100%; border-radius: 5px; }
+    /* Pulsanti Sidebar */
+    .stButton > button { width: 100%; border-radius: 5px; font-size: 14px !important; }
     .stDownloadButton button { border: 1px solid #ddd !important; background-color: #f9f9f9 !important; font-size: 14px !important; border-radius: 5px !important; }
     
+    /* Logout/Clean specifici */
+    .clean-btn button { color: #d9534f !important; }
+    
     label, p, h1, h2, h3 { color: #212529 !important; font-family: 'Segoe UI', sans-serif; }
-    .stAlert { border-radius: 10px; }
+    .stProgress > div > div > div > div { background-color: #0078D4 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -89,29 +95,70 @@ if check_password():
             return json.loads(blob.download_as_text()) if blob.exists() else {}
         except: return {}
 
+    def save_cloud_json(path, data):
+        bucket.blob(path).upload_from_string(json.dumps(data))
+
+    @st.cache_data(ttl=300) # Aggiorna ogni 5 minuti
+    def get_bucket_metrics():
+        blobs = list(bucket.list_blobs())
+        total_bytes = sum(b.size for b in blobs)
+        img_bytes = sum(b.size for b in blobs if b.name.lower().endswith(('.png', '.jpg', '.jpeg')))
+        return total_bytes / (1024**3), img_bytes / (1024**2) # GB e MB
+
     def add_task_to_sync(code, task_type="item_zip", items=None):
         queue = get_cloud_json("metadata/sync_queue.json")
         task_id = f"{task_type}_{int(time.time())}"
         queue[task_id] = {
             "code": code,
-            "type": task_type, # 'item_zip', 'bulk_zip', 'link'
+            "type": task_type,
             "items": items if items else [code],
             "synced": False,
             "timestamp": time.time()
         }
-        bucket.blob("metadata/sync_queue.json").upload_from_string(json.dumps(queue))
+        save_cloud_json("metadata/sync_queue.json", queue)
         st.toast(f"Richiesta {task_type} inviata!")
 
-    # --- 3. SIDEBAR (Design 4.4 con Box Bordati) ---
+    # --- 3. SIDEBAR (Design 4.5 con Monitor Spazio e Clean Cloud) ---
     with st.sidebar:
         st.title("⚙️ Sistema Vault")
+        
+        # Stato Server
         hb = get_cloud_json("metadata/heartbeat.json")
         if (time.time() - hb.get('last_seen', 0)) < 120: st.success("● ARCHIVIO ONLINE")
         else: st.error("● ARCHIVIO OFFLINE")
         
-        if st.button("🚪 Esci dal sistema", help="Disconnetti"): logout()
-        st.divider()
+        # TASTI AZIONE (Logout e Clean)
+        c_out, c_clean = st.columns(2)
+        with c_out:
+            if st.button("🚪 Logout", help="Disconnetti"): logout()
+        with c_clean:
+            if st.button("🧹 Clean", help="Elimina file tecnici dal cloud (mantieni immagini)"):
+                with st.spinner("Pulizia Cloud in corso..."):
+                    blobs = bucket.list_blobs(prefix="archive/")
+                    deleted_count = 0
+                    for b in blobs:
+                        if not b.name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            b.delete()
+                            deleted_count += 1
+                    # Svuota anche history e queue per coerenza
+                    save_cloud_json("metadata/history.json", [])
+                    save_cloud_json("metadata/sync_queue.json", {})
+                    st.cache_data.clear()
+                    st.success(f"Pulizia completata! {deleted_count} file rimossi.")
+                    time.sleep(2)
+                    st.rerun()
+
+        # MONITOR SPAZIO (Riga Rossa)
+        st.write("---")
+        total_gb, img_mb = get_bucket_metrics()
+        st.write(f"📊 **Uso Cloud:** {total_gb:.2f} GB / {LIMIT_TOTAL_GB} GB")
+        st.progress(min(total_gb / LIMIT_TOTAL_GB, 1.0))
         
+        st.caption(f"📸 Immagini: {img_mb:.1f} MB / {LIMIT_IMAGES_MB} MB")
+        if img_mb > LIMIT_IMAGES_MB:
+            st.warning("⚠️ Limite immagini superato (500MB)")
+        
+        st.divider()
         st.subheader("⏳ In Sincronizzazione")
         queue = get_cloud_json("metadata/sync_queue.json")
         if not queue: st.caption("Coda vuota.")
@@ -122,7 +169,7 @@ if check_password():
         history = get_cloud_json("metadata/history.json")
         if not history: st.caption("Nessun file pronto.")
         else:
-            for entry in list(history)[:15]:
+            for entry in list(history)[:10]:
                 with st.container(border=True):
                     st.write(f"📦 **{entry['code']}**")
                     if entry.get('type') == 'link':
@@ -132,18 +179,11 @@ if check_password():
                     else:
                         zip_blob = bucket.blob(f"archive/{entry['code']}/{entry['code']}.zip")
                         if zip_blob.exists():
-                            st.download_button(
-                                label="⬇️ Scarica ZIP",
-                                data=zip_blob.download_as_bytes(),
-                                file_name=f"{entry['code']}.zip",
-                                key=f"dl_zip_{entry['code']}"
-                            )
+                            st.download_button(label="⬇️ ZIP", data=zip_blob.download_as_bytes(), file_name=f"{entry['code']}.zip", key=f"dl_z_{entry['code']}")
                         else:
-                            # Se non è uno ZIP, mostra i formati singoli
                             for f in entry.get('formats', []):
                                 b = bucket.blob(f"archive/{entry['code']}/{entry['code']}.{f.lower()}")
-                                if b.exists():
-                                    st.download_button(f"⬇️ {f}", b.download_as_bytes(), f"{entry['code']}.{f.lower()}", key=f"hdl_{entry['code']}_{f}")
+                                if b.exists(): st.download_button(f"⬇️ {f}", b.download_as_bytes(), f"{entry['code']}.{f.lower()}", key=f"dl_{entry['code']}_{f}")
 
     # --- 4. CORPO CENTRALE ---
     st.image("cover.jpg", use_container_width=True)
@@ -177,12 +217,20 @@ if check_password():
         with c2: t_art = st.text_input("Tag (separati da virgola)")
         sel_cat = st.selectbox("Categoria", list(CATEGORIE_FISSE.keys()))
         files = st.file_uploader("Trascina file", accept_multiple_files=True)
+        
+        # Check Image Limit before upload
+        total_gb, img_mb = get_bucket_metrics()
+        if img_mb > LIMIT_IMAGES_MB:
+            st.error(f"🛑 Limite immagini raggiunto ({LIMIT_IMAGES_MB}MB). Pulire il cloud prima di nuovi inserimenti.")
+        
         if st.button("🚀 ESEGUI CHECK-IN", use_container_width=True, type="primary") and n_art and files:
-            task = {"nome_articolo": n_art, "percorso_relativo": CATEGORIE_FISSE[sel_cat], "tags": [t.strip() for t in t_art.split(',')], "solo_trasferimento": False}
-            prefix = f"inbox/{n_art}_{int(time.time())}"
-            bucket.blob(f"{prefix}/{n_art}_task.json").upload_from_string(json.dumps(task))
-            for f in files: bucket.blob(f"{prefix}/{f.name}").upload_from_string(f.getvalue())
-            st.success("Archiviazione inviata al Bridge!")
+            if img_mb > LIMIT_IMAGES_MB: st.stop()
+            with st.spinner("Invio al Cloud..."):
+                task = {"nome_articolo": n_art, "percorso_relativo": CATEGORIE_FISSE[sel_cat], "tags": [t.strip() for t in t_art.split(',')], "solo_trasferimento": False}
+                prefix = f"inbox/{n_art}_{int(time.time())}"
+                bucket.blob(f"{prefix}/{n_art}_task.json").upload_from_string(json.dumps(task))
+                for f in files: bucket.blob(f"{prefix}/{f.name}").upload_from_string(f.getvalue())
+                st.success("Archiviazione inviata al Bridge!")
 
     with t2:
         st.subheader("Ricerca nell'Archivio")
@@ -204,31 +252,29 @@ if check_password():
                     ctx, cv, cz, ca = st.columns([0.7, 0.1, 0.1, 0.1])
                     with ctx: st.markdown(f"**{item['code']}**"); st.caption(f"{item['category']} | {', '.join(item['formats'])}")
                     with cv: 
-                        if st.button("🔍", key=f"v_{item['code']}", help="Dettagli e singoli"): preview_dialog(item)
+                        if st.button("🔍", key=f"v_{item['code']}", help="Dettagli"): preview_dialog(item)
                     with cz:
-                        if st.button("📦", key=f"z_{item['code']}", help="Prepara ZIP articolo"): add_task_to_sync(item['code'], "item_zip")
+                        if st.button("📦", key=f"z_{item['code']}", help="Prepara ZIP"): add_task_to_sync(item['code'], "item_zip")
                     with ca:
                         is_in = item['code'] in st.session_state.bulk_list
-                        if st.button("✅" if is_in else "➕", key=f"a_{item['code']}", help="Aggiungi al Carrello"):
+                        if st.button("✅" if is_in else "➕", key=f"a_{item['code']}", help="Carrello"):
                             if is_in: st.session_state.bulk_list.remove(item['code'])
                             else: st.session_state.bulk_list.append(item['code'])
                             st.rerun()
         if len(filtered) > st.session_state.limit_results: st.button("Mostra altri...", on_click=show_more)
 
-        # --- ZONA CARRELLO (Design 4.4) ---
         if st.session_state.bulk_list:
             st.markdown("---")
             st.subheader("🧺 Carrello Spedizione Bulk")
             st.info(f"Articoli selezionati: **{', '.join(st.session_state.bulk_list)}**")
-            c1, c2, c3 = st.columns(3)
-            with c1:
+            cb1, cb2, cclr = st.columns(3)
+            with cb1:
                 if st.button("🚀 PREPARA ZIP", use_container_width=True):
                     add_task_to_sync(f"BULK_{int(time.time())}", "bulk_zip", st.session_state.bulk_list)
                     st.session_state.bulk_list = []; st.rerun()
-            with c2:
+            with cb2:
                 if st.button("🔗 GENERA LINK", use_container_width=True):
                     add_task_to_sync(f"LINK_{int(time.time())}", "link", st.session_state.bulk_list)
                     st.session_state.bulk_list = []; st.rerun()
-            with c3:
-                if st.button("🗑️ Svuota Carrello", use_container_width=True):
-                    st.session_state.bulk_list = []; st.rerun()
+            with cclr:
+                if st.button("🗑️ Svuota Carrello", use_container_width=True): st.session_state.bulk_list = []; st.rerun()
