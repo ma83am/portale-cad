@@ -13,38 +13,19 @@ INBOX_ROOT = os.path.join(BASE_PATH, "0_FILE DA PROCESSARE")
 CLOUD_INBOX = os.path.join(INBOX_ROOT, "CLOUD_INBOX")
 
 def update_remote_metadata(bucket):
-    """Crea la mappa delle cartelle e sottocartelle in formato DIZIONARIO (Bulletproof)."""
-    exclude = ['0_FILE DA PROCESSARE', 'scripts', 'procedures', '.streamlit', 'secrets', 'archive', 'metadata']
-    category_map = {}
-    
-    if not os.path.exists(BASE_PATH):
-        print(f"⚠️ BASE_PATH non trovato: {BASE_PATH}")
-        return
-
-    # Scansione del disco D:
-    for d in os.listdir(BASE_PATH):
-        full_path = os.path.join(BASE_PATH, d)
-        # Consideriamo solo le cartelle principali numerate (es. 1_ASSIEMI) e non escluse
-        if os.path.isdir(full_path) and d[0].isdigit() and d not in exclude:
-            # Cerchiamo sottocartelle reali (es. dentro 4_COMMERCIALI)
-            subs = [s for s in os.listdir(full_path) 
-                    if os.path.isdir(os.path.join(full_path, s)) and not s.startswith('.')]
-            category_map[d] = subs
-            
-    # Caricamento sul Cloud
-    bucket.blob("metadata/categories.json").upload_from_string(
-        json.dumps(category_map), 
-        content_type='application/json'
-    )
+    """Invia Heartbeat per lo stato Online. Le categorie sono ora gestite rigidamente dal Web."""
     # Heartbeat per lo stato Online
     bucket.blob("metadata/heartbeat.json").upload_from_string(
         json.dumps({"last_seen": time.time()})
     )
-    print(f"🔄 Mappa categorie aggiornata ({len(category_map)} main): {list(category_map.keys())}")
+    print(f"🔄 Heartbeat sincronizzato: {time.strftime('%H:%M:%S')}")
 
-def archive_new_item(temp_folder, nome, categoria_completa, tags):
-    """Sposta i file dal CLOUD_INBOX alla cartella finale e aggiorna l'indice."""
-    dest_dir = os.path.join(BASE_PATH, categoria_completa.replace("/", "\\"), nome)
+def archive_new_item(temp_folder, nome, percorso_relativo, tags):
+    """Archivia i file usando il percorso rigido inviato dal web."""
+    # Trasforma "4_COMMERCIALI/4.1_A CATALOGO" in percorso Windows corretto
+    rel_path_win = percorso_relativo.replace("/", "\\")
+    dest_dir = os.path.join(BASE_PATH, rel_path_win, nome)
+    
     os.makedirs(dest_dir, exist_ok=True)
     
     formats = []
@@ -63,15 +44,21 @@ def archive_new_item(temp_folder, nome, categoria_completa, tags):
                 main_file_path = dest_f
         except Exception as e: print(f"⚠️ Errore spostamento {f}: {e}")
             
+    # Se non c'è un file 3D, prendi il primo disponibile
+    if not main_file_path and os.listdir(dest_dir):
+        main_file_path = os.path.join(dest_dir, os.listdir(dest_dir)[0])
+
+    # Aggiornamento Indice Locale
     idx_path = os.path.join(BASE_PATH, "archivio.json")
     if os.path.exists(idx_path):
         try:
             with open(idx_path, 'r+') as f:
                 db = json.load(f)
+                # Rimuovi entry esistenti
                 db['components'] = [c for c in db.get('components', []) if c['code'] != nome]
                 db['components'].append({
                     "code": nome,
-                    "category": categoria_completa,
+                    "category": percorso_relativo, # Salviamo il percorso relativo come categoria
                     "tags": [t.strip() for t in tags.split(',')] if isinstance(tags, str) else tags,
                     "formats": list(set(formats)),
                     "path": main_file_path,
@@ -80,7 +67,7 @@ def archive_new_item(temp_folder, nome, categoria_completa, tags):
                 f.seek(0)
                 json.dump(db, f, indent=4)
                 f.truncate()
-            print(f"✅ Archiviato: {nome} in {categoria_completa}")
+            print(f"✅ Archiviato: {nome} in {percorso_relativo}")
         except Exception as e: print(f"❌ Errore indice: {e}")
     return dest_dir
 
@@ -109,26 +96,30 @@ def sync_previews(bucket):
 def process_cloud_inbox(bucket):
     """Gestisce il caricamento e l'archiviazione automatica."""
     blobs = list(bucket.list_blobs(prefix="inbox/"))
-    tasks = [b for b in blobs if b.name.endswith('_task.json')]
+    tasks = [b for b in blobs if b.name.endswith('.json')]
     for t_blob in tasks:
         try:
             data = json.loads(t_blob.download_as_text())
             nome = data.get('nome_articolo', 'SenzaNome')
-            categoria = data.get('categoria', 'NON_CATEGORIZZATO')
+            categoria = data.get('categoria', 'NON_CATEGORIZZATO') # Questo ora è percorso_relativo
             tags = data.get('tags', [])
             solo_trasferimento = data.get('solo_trasferimento', False)
+            
             temp_path = os.path.join(INBOX_ROOT, "TEMP_" + nome)
             os.makedirs(temp_path, exist_ok=True)
-            prefix = t_blob.name.replace('_task.json', '/')
+            
+            prefix = t_blob.name.replace('.json', '/')
             for b in blobs:
                 if b.name.startswith(prefix):
                     b.download_to_filename(os.path.join(temp_path, os.path.basename(b.name)))
                     b.delete()
+            
             if solo_trasferimento:
                 final_inbox = os.path.join(CLOUD_INBOX, nome)
                 os.makedirs(final_inbox, exist_ok=True)
                 for f in os.listdir(temp_path): shutil.move(os.path.join(temp_path, f), os.path.join(final_inbox, f))
                 shutil.rmtree(temp_path)
+                print(f"🚚 Articolo {nome} parcheggiato in CLOUD_INBOX.")
             else:
                 archive_new_item(temp_path, nome, categoria, ", ".join(tags) if isinstance(tags, list) else tags)
                 shutil.rmtree(temp_path)
@@ -202,7 +193,7 @@ def cleanup_previews(bucket, limit_gb=5):
 if __name__ == "__main__":
     import sys; import io
     if sys.platform == "win32": sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    print("🚀 Bridge 3.4.1 Operativo (Bulletproof Scanning Engine)...")
+    print("🚀 Bridge 3.6 Operativo (Rigid Category Engine)...")
     client = storage.Client(); bucket = client.bucket(BUCKET_NAME)
     while True:
         try:
