@@ -43,34 +43,37 @@ def process_sync_queue():
             db = json.load(f).get('components', [])
 
         for code, data in list(queue.items()):
-            if not data.get('synced', False):
-                item = next((i for i in db if i['code'] == code), None)
-                if item:
-                    item_path = item.get('path')
-                    if not item_path: continue
-                    
-                    folder = os.path.dirname(item_path)
-                    # Carica tutti i formati disponibili per quel pezzo
-                    for fmt in item['formats']:
-                        local_f = os.path.join(folder, f"{code}.{fmt.lower()}")
-                        if os.path.exists(local_f):
-                            bucket.blob(f"archive/{code}/{code}.{fmt.lower()}").upload_from_filename(local_f)
-                    
-                    # Rimuovi dalla coda e sposta in History con timer 24h
+            # La nuova logica prevede che 'data' contenga la lista di 'formats' richiesti
+            item = next((i for i in db if i['code'] == code), None)
+            if item:
+                folder = os.path.dirname(item['path'])
+                requested_fmts = data.get('formats', [])
+                if not requested_fmts: requested_fmts = item['formats']
+                
+                synced_now = []
+                for fmt in requested_fmts:
+                    local_f = os.path.join(folder, f"{code}.{fmt.lower()}")
+                    if os.path.exists(local_f):
+                        bucket.blob(f"archive/{code}/{code}.{fmt.lower()}").upload_from_filename(local_f)
+                        synced_now.append(fmt)
+                        print(f"⚡ Caricato: {code}.{fmt}")
+                
+                if synced_now:
+                    # Sposta da coda a history
                     del queue[code]
-                    # Rimuovi eventuali duplicati nella history prima di inserire
+                    # Aggiorna history (evita duplicati)
                     history = [h for h in history if h['code'] != code]
                     history.insert(0, {
                         "code": code, 
+                        "formats": list(set(synced_now)), 
                         "timestamp_sync": time.time(),
                         "category": item['category']
                     })
                     updated = True
-                    print(f"⚡ Sincronizzato e messo in cronologia: {code}")
 
         if updated:
             q_blob.upload_from_string(json.dumps(queue))
-            h_blob.upload_from_string(json.dumps(history[:20])) # Tieni ultimi 20
+            h_blob.upload_from_string(json.dumps(history[:20]))
     except Exception as e:
         print(f"❌ Errore Sync Queue: {e}")
 
@@ -126,7 +129,6 @@ def process_checkin():
             main_path = ""
             for b in blobs:
                 if b.name.startswith(prefix) and not b.name.endswith('_task.json'):
-                    # Ottieni l'estensione originale
                     orig_ext = b.name.split('.')[-1]
                     local_path = os.path.join(dest_dir, f"{nome}.{orig_ext.lower()}")
                     b.download_to_filename(local_path)
@@ -135,7 +137,6 @@ def process_checkin():
                         main_path = local_path
                     b.delete()
             
-            # Aggiorna archivio.json se non è solo trasferimento
             if not data.get('solo_trasferimento'):
                 idx_path = os.path.join(BASE_PATH, "archivio.json")
                 if os.path.exists(idx_path):
@@ -158,12 +159,11 @@ def process_checkin():
             print(f"❌ Errore Check-in: {e}")
 
 if __name__ == "__main__":
-    import sys
-    import io
+    import sys, io
     if sys.platform == "win32":
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
         
-    print("🚀 Bridge 4.0 ONLINE (Cloud 24h & History Mode)")
+    print("🚀 Bridge 4.1 ONLINE (Format-Sync & Clean UI Support)")
     while True:
         try:
             update_heartbeat()
@@ -172,4 +172,4 @@ if __name__ == "__main__":
             cleanup_24h()
         except Exception as e:
             print(f"⚠️ Errore Ciclo: {e}")
-        time.sleep(30)
+        time.sleep(15)
