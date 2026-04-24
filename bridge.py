@@ -12,6 +12,7 @@ BASE_PATH = r"D:\ARCHIVIO CAD"
 BUCKET_NAME = "cad-vault-marco"
 INBOX_ROOT = os.path.join(BASE_PATH, "0_FILE DA PROCESSARE")
 CLOUD_INBOX = os.path.join(INBOX_ROOT, "CLOUD_INBOX")
+UPLOAD_PREFIX = "portale_inbox" # BINARIO SEGRETO PER EVITARE CONFLITTI
 
 client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
@@ -81,37 +82,35 @@ def process_sync_queue():
     except Exception as e: print(f"❌ Errore Sync Queue: {e}")
 
 def process_checkin():
-    """Scarica i file nella CLOUD_INBOX locale senza indicizzare."""
-    blobs = list(bucket.list_blobs(prefix="inbox/"))
+    """Scarica i file nella CLOUD_INBOX locale usando il nuovo prefisso segreto."""
+    blobs = list(bucket.list_blobs(prefix=f"{UPLOAD_PREFIX}/"))
     tasks = [b for b in blobs if b.name.endswith('_task.json')]
     for t_blob in tasks:
         try:
             data = json.loads(t_blob.download_as_text())
             nome = data['nome_articolo']
-            # DESTINAZIONE: CLOUD_INBOX/[NOME]
             dest_dir = os.path.join(CLOUD_INBOX, nome)
             os.makedirs(dest_dir, exist_ok=True)
             
-            print(f"📥 Ricezione file per CLOUD_INBOX: {nome}")
+            print(f"📥 Ricezione sicura per {nome} (Binario {UPLOAD_PREFIX})")
             folder_prefix = os.path.dirname(t_blob.name) + "/"
             
-            # 1. Scarica e rinomina i file
+            # Scarica e rinomina i file tecnici
             for b in blobs:
                 if b.name.startswith(folder_prefix) and not b.name.endswith('_task.json'):
                     ext = b.name.split('.')[-1].lower()
                     local_f_path = os.path.join(dest_dir, f"{nome}.{ext}")
                     b.download_to_filename(local_f_path)
                     b.delete()
-                    print(f"   - {nome}.{ext} scaricato.")
+                    print(f"   - {nome}.{ext} scaricato correttamente in CLOUD_INBOX.")
             
-            # 2. Salva il file JSON delle info dentro la cartella
+            # Salva il file JSON delle info
             with open(os.path.join(dest_dir, f"{nome}.json"), 'w') as f:
                 json.dump(data, f, indent=4)
-            print(f"   - {nome}.json salvato.")
             
-            # 3. Pulizia Cloud
+            # Pulizia Cloud
             t_blob.delete()
-            print(f"✅ Pronti per check-in manuale in: {dest_dir}")
+            print(f"✅ Pronto in: {dest_dir}")
         except Exception as e: print(f"❌ Errore ricezione {t_blob.name}: {e}")
 
 def cleanup_24h():
@@ -133,7 +132,7 @@ def cleanup_24h():
 if __name__ == "__main__":
     import sys, io
     if sys.platform == "win32": sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    print("🚀 Bridge 4.6 ONLINE (Semi-Automatic Mode / CLOUD_INBOX Ready)")
+    print(f"🚀 Bridge 4.7 ONLINE (Modalità Segreta: {UPLOAD_PREFIX})")
     while True:
         try:
             update_heartbeat()
